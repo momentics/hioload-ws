@@ -1,57 +1,46 @@
+// Copyright (c) 2025
 // Author: momentics <momentics@gmail.com>
-// SPDX-License-Identifier: MIT
+
+// Example echo server using the TCP/WebSocket skeleton.
 
 package main
 
 import (
-    "context"
+    "bufio"
     "fmt"
+    "github.com/momentics/hioload-ws/transport/tcp"
+    "io"
     "net"
-    "os"
-    "os/signal"
-    "github.com/momentics/hioload-ws/fake"
-    "github.com/momentics/hioload-ws/transport"
-    "github.com/momentics/hioload-ws/protocol"
 )
 
-func main() {
-    listener, err := net.Listen("tcp", ":9001")
-    if err != nil {
-        panic(err)
-    }
-    fmt.Println("Echo WebSocket server started on :9001...")
-
-    pool := &fake.FakeBytePool{}
-
-    // Handle SIGINT for graceful shutdown.
-    ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-    defer cancel()
-
-    go func() {
-        for {
-            conn, err := listener.Accept()
-            if err != nil {
-                continue
+// echoHandler echoes received lines back to the client.
+func echoHandler(conn net.Conn) {
+    defer conn.Close()
+    rdr := bufio.NewReader(conn)
+    for {
+        msg, err := rdr.ReadString('\n')
+        if err != nil {
+            if err != io.EOF {
+                fmt.Printf("recv error: %v\n", err)
             }
-            go handleConn(conn, pool)
+            return
         }
-    }()
-
-    <-ctx.Done()
-    fmt.Println("Server shutting down.")
+        fmt.Printf("Received: %s", msg)
+        _, err = conn.Write([]byte(msg))
+        if err != nil {
+            fmt.Printf("send error: %v\n", err)
+            return
+        }
+    }
 }
 
-func handleConn(conn net.Conn, pool *fake.FakeBytePool) {
-    netc := transport.NewNetConn(conn, pool)
-    wsc := protocol.NewWebSocketConn(netc, pool)
-    defer wsc.Close()
-
-    for {
-        frame, err := wsc.ReadFrame()
-        if err != nil || frame == nil {
-            break
-        }
-        // Echo back
-        _ = wsc.WriteFrame(frame)
+func main() {
+    cfg := &tcp.ListenerConfig{
+        Addr:       ":9001",
+        WorkerCPUs: []int{0}, // Pins acceptor to CPU 0 on Linux if possible.
+        ConnHandler: echoHandler,
+    }
+    if err := tcp.StartTCPListener(cfg); err != nil {
+        fmt.Printf("Listener error: %v\n", err)
     }
 }
