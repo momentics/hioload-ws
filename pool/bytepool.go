@@ -1,45 +1,36 @@
+// File: pool/bytepool.go
 // Author: momentics <momentics@gmail.com>
-// SPDX-License-Identifier: MIT
 
 package pool
 
-// BytePool provides zero-copy buffer management (thread/NUMA aware).
-type BytePool interface {
-    Get() []byte
-    Put([]byte)
+
+// BytePool is compatible with NUMA-pool if enabled.
+type BytePool struct {
+	npool *NUMAPool // If set, use NUMA-aware pool, fallback to sync.Pool.
+	size  int
 }
 
-// SimpleBytePool is a trivial, non-threadsafe pool for illustration.
-type SimpleBytePool struct {
-    bufs chan []byte
-    size int
+func NewBytePool(size int, node int, useNUMA bool) *BytePool {
+	return &BytePool{
+		npool: NewNUMAPool(node, size, useNUMA),
+		size:  size,
+	}
 }
 
-// NewSimpleBytePool creates a new pool with the given capacity and buffer size.
-func NewSimpleBytePool(capacity, size int) *SimpleBytePool {
-    bp := &SimpleBytePool{
-        bufs: make(chan []byte, capacity),
-        size: size,
-    }
-    for i := 0; i < capacity; i++ {
-        bp.bufs <- make([]byte, size)
-    }
-    return bp
+// GetBuffer returns a buffer from the pool.
+func (b *BytePool) GetBuffer() []byte {
+	if b.npool != nil && b.npool.enable {
+		return b.npool.Get()
+	}
+	// fallback: make regular slice
+	return make([]byte, b.size)
 }
 
-func (bp *SimpleBytePool) Get() []byte {
-    select {
-    case b := <-bp.bufs:
-        return b
-    default:
-        return make([]byte, bp.size)
-    }
-}
-
-func (bp *SimpleBytePool) Put(b []byte) {
-    select {
-    case bp.bufs <- b:
-    default:
-        // Discard if pool is full.
-    }
+// PutBuffer returns a buffer to the pool.
+func (b *BytePool) PutBuffer(buf []byte) {
+	if b.npool != nil && b.npool.enable {
+		b.npool.Put(buf)
+		return
+	}
+	// fallback: GC handles memory
 }

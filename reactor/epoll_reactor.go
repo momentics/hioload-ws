@@ -10,7 +10,6 @@ package reactor
 
 import (
     "fmt"
-    "os"
     "sync"
     "syscall"
 )
