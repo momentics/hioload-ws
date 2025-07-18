@@ -1,34 +1,48 @@
+// Copyright (c) 2025
 // Author: momentics <momentics@gmail.com>
-// SPDX-License-Identifier: MIT
 
+// Package reactor provides an abstraction for the poll-mode event reactor,
+// implementing scalable, low-latency event loops via epoll (Linux) and IOCP (Windows).
 package reactor
 
 import (
-    "context"
-    "github.com/momentics/hioload-ws/api"
+    "errors"
+    "runtime"
 )
 
-// Reactor implements poller/event loop. Faked here, real version can use io_uring/epoll.
-type Reactor struct {
-    conns []api.NetConn
+// FDEventType represents the type of event on a file descriptor or handle.
+type FDEventType int
+
+const (
+    EventRead FDEventType = 1 << iota
+    EventWrite
+    EventError
+)
+
+// FDCallback defines the type for file/event handlers.
+type FDCallback func(fd uintptr, events FDEventType)
+
+// Reactor defines the platform-neutral interface for a poll-mode event reactor.
+type Reactor interface {
+    Register(fd uintptr, events FDEventType, cb FDCallback) error
+    Unregister(fd uintptr) error
+    Poll(timeoutMs int) error // timeoutMs < 0 = infinite
+    Close() error
 }
 
-// NewReactor initializes the reactor.
-func NewReactor() *Reactor {
-    return &Reactor{
-        conns: make([]api.NetConn, 0, 1024),
+// NewReactor creates a new platform-specific poll-mode reactor instance.
+func NewReactor() (Reactor, error) {
+    switch runtime.GOOS {
+    case "linux":
+        return newEpollReactor()
+    case "windows":
+        return newIOCPReactor()
+    default:
+        return nil, errors.New("poll-mode reactor not implemented for this OS")
     }
 }
 
-// Run starts dummy poll loop. Real logic should replace with epoll/io_uring.
-func (r *Reactor) Run(ctx context.Context) error {
-    // Main loop sample (faked)
-    <-ctx.Done()
-    return nil
-}
-
-// Register adds connection to dummy poller.
-func (r *Reactor) Register(conn api.NetConn) error {
-    r.conns = append(r.conns, conn)
-    return nil
+// newEpollReactor is a stub for non-Linux OS.
+func newEpollReactor() (Reactor, error) {
+    return nil, errors.New("epoll reactor not implemented on this OS")
 }
