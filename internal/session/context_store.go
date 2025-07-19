@@ -1,98 +1,107 @@
+// File: internal/session/context_store.go
 // Package session
 // Author: momentics <momentics@gmail.com>
 //
-// Thread-safe, propagation-aware high-performance context store for sessions.
+// Thread-safe, propagation-aware context store implementing api.Context.
 
 package session
 
 import (
 	"sync"
 	"time"
+
+	"github.com/momentics/hioload-ws/api"
 )
 
 type entry struct {
-	val        any
+	value      any
 	propagated bool
 	expiry     time.Time
 }
 
+// contextStore holds key/value entries with optional TTL and propagation.
 type contextStore struct {
 	mu    sync.RWMutex
 	store map[string]entry
 }
 
-// newContextStore creates an empty, thread-safe context store.
+// Ensure compile-time API compliance.
+var _ api.Context = (*contextStore)(nil)
+
+// newContextStore creates an empty contextStore.
 func newContextStore() *contextStore {
 	return &contextStore{
 		store: make(map[string]entry),
 	}
 }
 
-// Set stores a key-value pair with optional propagation flag.
+// Set assigns a value under key, marking it for propagation if requested.
 func (c *contextStore) Set(key string, value any, propagated bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.store[key] = entry{val: value, propagated: propagated}
+	c.store[key] = entry{value: value, propagated: propagated}
 }
 
-// Get retrieves a value and its existence.
+// Get retrieves a value by key; returns false if missing or expired.
 func (c *contextStore) Get(key string) (any, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	e, ok := c.store[key]
-	if !ok || (!e.expiry.IsZero() && time.Now().After(e.expiry)) {
+	if !ok {
 		return nil, false
 	}
-	return e.val, true
+	if !e.expiry.IsZero() && time.Now().After(e.expiry) {
+		return nil, false
+	}
+	return e.value, true
 }
 
-// Delete removes a key.
+// Delete removes the key from the store.
 func (c *contextStore) Delete(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.store, key)
 }
 
-// Clone returns a shallow clone of the context.
-func (c *contextStore) Clone() *contextStore {
+// Clone produces a shallow copy of the contextStore for propagation.
+func (c *contextStore) Clone() api.Context {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-
-	cp := make(map[string]entry, len(c.store))
+	copyMap := make(map[string]entry, len(c.store))
 	for k, v := range c.store {
-		cp[k] = v
+		copyMap[k] = v
 	}
-	return &contextStore{
-		store: cp,
-	}
+	return &contextStore{store: copyMap}
 }
 
-// WithExpiration sets expiration timestamp for a key.
-func (c *contextStore) WithExpiration(key string, ttl time.Duration) {
+// WithExpiration sets a TTL (in nanoseconds) on the given key.
+func (c *contextStore) WithExpiration(key string, ttlNanos int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.store[key]; ok {
-		e.expiry = time.Now().Add(ttl)
+		e.expiry = time.Now().Add(time.Duration(ttlNanos))
 		c.store[key] = e
 	}
 }
 
-// Keys returns all active keys.
-func (c *contextStore) Keys() []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	keys := make([]string, 0, len(c.store))
-	for k := range c.store {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
-// IsPropagated reports propagation flag.
+// IsPropagated returns whether the key is marked for propagation.
 func (c *contextStore) IsPropagated(key string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	e, ok := c.store[key]
 	return ok && e.propagated
+}
+
+// Keys returns all non-expired keys in the store.
+func (c *contextStore) Keys() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := time.Now()
+	keys := make([]string, 0, len(c.store))
+	for k, v := range c.store {
+		if v.expiry.IsZero() || v.expiry.After(now) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
 }

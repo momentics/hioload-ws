@@ -1,45 +1,70 @@
+// File: internal/session/session.go
 // Package session
 // Author: momentics <momentics@gmail.com>
 //
-// Core interfaces and types for connection/session state handling.
-// Stateless transport connections (like WebSocket) wrap a session object with user scope.
+// Core session implementation with cancellation, deadline, and context.
 
 package session
 
 import (
+	"sync"
 	"time"
+
 	"github.com/momentics/hioload-ws/api"
 )
 
-// Session represents a long-lived user or transport connection context.
-type Session interface {
-	// ID returns global unique session key.
-	ID() string
+// Ensure compile-time API compliance if api.Session exists:
+// var _ api.Session = (*sessionImpl)(nil)
 
-	// Context returns the scoped context storage.
-	Context() api.Context
-
-	// Cancel cancels the session (lifecycle end).
-	Cancel()
-
-	// Done signals session closure.
-	Done() <-chan struct{}
-
-	// Deadline returns expiry time if set.
-	Deadline() (time.Time, bool)
+// sessionImpl holds per-connection state, context, and cancellation.
+type sessionImpl struct {
+	id       string
+	ctx      *contextStore
+	done     chan struct{}
+	once     sync.Once
+	deadline time.Time
 }
 
-// SessionManager manages lifetime, lookup, and storage of active session objects.
-type SessionManager interface {
-	// Create inserts a session for a given ID, if not exists.
-	Create(id string) (Session, error)
+// newSession creates a new session with the given unique identifier.
+func newSession(id string) *sessionImpl {
+	return &sessionImpl{
+		id:   id,
+		ctx:  newContextStore(),
+		done: make(chan struct{}),
+	}
+}
 
-	// Get fetches a session by ID.
-	Get(id string) (Session, bool)
+// ID returns the unique session identifier.
+func (s *sessionImpl) ID() string {
+	return s.id
+}
 
-	// Delete closes and removes a session.
-	Delete(id string)
+// Context returns the underlying api.Context.
+func (s *sessionImpl) Context() api.Context {
+	return s.ctx
+}
 
-	// Range iterates all active sessions.
-	Range(fn func(Session))
+// Cancel signals session teardown; idempotent.
+func (s *sessionImpl) Cancel() {
+	s.once.Do(func() {
+		close(s.done)
+	})
+}
+
+// Done returns a channel closed upon cancellation.
+func (s *sessionImpl) Done() <-chan struct{} {
+	return s.done
+}
+
+// Deadline returns the session expiration if set.
+func (s *sessionImpl) Deadline() (time.Time, bool) {
+	if s.deadline.IsZero() {
+		return time.Time{}, false
+	}
+	return s.deadline, true
+}
+
+// WithDeadline sets an absolute deadline for the session.
+func (s *sessionImpl) WithDeadline(t time.Time) {
+	s.deadline = t
 }
