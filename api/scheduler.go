@@ -1,18 +1,18 @@
 // Package api
-// Author: momentics
+// Author: momentics <momentics@gmail.com>
 //
-// Scheduler contract for high-precision timed and event-driven job execution.
+// Scheduler contract for high-resolution timer/event scheduling.
 
 package api
 
-// Scheduler abstracts event/timer scheduling for async/highload loops.
+// Scheduler defines the interface for scheduling timed async jobs.
 type Scheduler interface {
-    // Schedule schedules a callback to be executed after delayNanos.
+    // Schedule registers a function to be executed after a delay in nanoseconds.
     Schedule(delayNanos int64, fn func()) (Cancelable, error)
 
-    // Cancel cancels a previously scheduled callback.
+    // Cancel removes a previously scheduled task.
     Cancel(c Cancelable) error
 
-    // Now returns monotonic time in nanoseconds.
+    // Now returns the current monotonic nanosecond time.
     Now() int64
 }
