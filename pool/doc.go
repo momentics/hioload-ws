@@ -1,8 +1,9 @@
+// File: pool/doc.go
 // Package pool
 // Author: momentics <momentics@gmail.com>
 //
-// High-performance IO and Memory Layer for hioload-ws.
-// Implements NUMA-aware, lock-free, zero-copy buffer pooling, batching, and ring buffering.
-// All primitives are cross-platform (Linux/Windows) and designed for ultra-low-latency, high-throughput workloads.
-// See bufferpool.go, batch.go, ring.go for implementation details.
+// High-performance, cross-platform buffer pooling, batching, and ring buffer layer for hioload-ws.
+// Implements NUMA-aware, zero-copy pools and batching primitives for all supported OS (Linux/Windows).
+// DPDK compatibility and extension via interface layer.
+// All core methods are thread-safe or explicitly document the concurrency contract.
 package pool

@@ -1,7 +1,8 @@
+// File: pool/bufferpool_windows.go
 // Author: momentics <momentics@gmail.com>
-// License: Apache-2.0
 //
 // Windows large-page buffer pool using VirtualAlloc.
+// Fallback allocs if large pages unavailable.
 
 package pool
 
@@ -10,9 +11,8 @@ import (
 	"syscall"
 	"unsafe"
 
-	"golang.org/x/sys/windows"
-
 	"github.com/momentics/hioload-ws/api"
+	"golang.org/x/sys/windows"
 )
 
 var (
@@ -26,29 +26,27 @@ type windowsBuffer struct {
 	numaID int
 }
 
-// Bytes implements api.Buffer.
 func (w *windowsBuffer) Bytes() []byte {
-	panic("unimplemented")
+	return w.data
 }
-
-// Copy implements api.Buffer.
 func (w *windowsBuffer) Copy() []byte {
-	panic("unimplemented")
+	dst := make([]byte, len(w.data))
+	copy(dst, w.data)
+	return dst
 }
-
-// NUMANode implements api.Buffer.
 func (w *windowsBuffer) NUMANode() int {
-	panic("unimplemented")
+	return w.numaID
 }
-
-// Release implements api.Buffer.
 func (w *windowsBuffer) Release() {
-	panic("unimplemented")
+	w.pool.recycle(w)
 }
-
-// Slice implements api.Buffer.
-func (w *windowsBuffer) Slice(from int, to int) api.Buffer {
-	panic("unimplemented")
+func (w *windowsBuffer) Slice(from, to int) api.Buffer {
+	if from < 0 || to > len(w.data) || from > to {
+		return nil
+	}
+	nb := *w
+	nb.data = nb.data[from:to]
+	return &nb
 }
 
 type windowsBufferPool struct {
@@ -63,24 +61,50 @@ func newBufferPool(numaNode int) api.BufferPool {
 }
 
 func (bp *windowsBufferPool) Get(size, numaPreferred int) api.Buffer {
+	bp.mu.Lock()
+	ch, ok := bp.pools[numaPreferred]
+	if !ok {
+		ch = make(chan *windowsBuffer, 1024)
+		bp.pools[numaPreferred] = ch
+	}
+	bp.mu.Unlock()
 	select {
-	case buf := <-bp.pools[numaPreferred]:
+	case buf := <-ch:
+		if cap(buf.data) < size {
+			buf.data = make([]byte, size)
+		} else {
+			buf.data = buf.data[:size]
+		}
 		return buf
 	default:
+		// Try VirtualAlloc large page; fallback to slice
 		addr, _, _ := procVirtualAlloc.Call(0, uintptr(size),
 			windows.MEM_RESERVE|windows.MEM_COMMIT|windows.MEM_LARGE_PAGES,
 			syscall.PAGE_READWRITE)
-		slice := (*[1 << 30]byte)(unsafe.Pointer(addr))[:size:size]
+		var slice []byte
+		if addr == 0 {
+			slice = make([]byte, size)
+		} else {
+			slice = (*[1 << 30]byte)(unsafe.Pointer(addr))[:size:size]
+		}
 		return &windowsBuffer{data: slice, pool: bp, numaID: numaPreferred}
 	}
 }
 
 func (bp *windowsBufferPool) Put(b api.Buffer) {
 	if wb, ok := b.(*windowsBuffer); ok {
-		bp.pools[wb.numaID] <- wb
+		select {
+		case bp.pools[wb.numaID] <- wb:
+		default:
+			// drop if pool full
+		}
 	}
 }
 
 func (bp *windowsBufferPool) Stats() api.BufferPoolStats {
 	return api.BufferPoolStats{}
+}
+
+func (bp *windowsBufferPool) recycle(b *windowsBuffer) {
+	bp.Put(b)
 }

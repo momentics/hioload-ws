@@ -1,8 +1,8 @@
-// Package pool
+// File: pool/ring.go
 // Author: momentics <momentics@gmail.com>
 //
-// Lock-free ring buffer for cross-thread, NUMA-local data transfer.
-// Uses atomic operations for concurrency, minimizes cache contention.
+// Lock-free ring buffer for cross-thread and NUMA-local data transfer.
+// All methods are thread-safe; internal padding minimizes cache contention.
 
 package pool
 
@@ -10,24 +10,22 @@ import (
 	"sync/atomic"
 )
 
-// RingBuffer is a lock-free fixed-capacity ring buffer.
+// RingBuffer is a lock-free fixed-capacity ring buffer (power-of-two size).
 type RingBuffer[T any] struct {
-	data     []T
-	size     uint64
-	mask     uint64
-	head     uint64
-	tail     uint64
-	_        [64]byte // Padding to avoid false sharing
+	data []T
+	mask uint64
+	head uint64
+	tail uint64
+	_    [64]byte // Padding for hot/cold separation
 }
 
-// NewRingBuffer allocates a ring buffer with size, must be power of two.
+// NewRingBuffer allocates a ring buffer with size (must be power of two).
 func NewRingBuffer[T any](size uint64) *RingBuffer[T] {
 	if size == 0 || (size&(size-1)) != 0 {
-		panic("size must be power of 2")
+		panic("ring buffer size must be power of two")
 	}
 	return &RingBuffer[T]{
 		data: make([]T, size),
-		size: size,
 		mask: size - 1,
 	}
 }
@@ -36,7 +34,7 @@ func NewRingBuffer[T any](size uint64) *RingBuffer[T] {
 func (r *RingBuffer[T]) Enqueue(val T) bool {
 	head := atomic.LoadUint64(&r.head)
 	tail := atomic.LoadUint64(&r.tail)
-	if (tail-head) == r.size {
+	if (tail - head) == uint64(len(r.data)) {
 		return false
 	}
 	idx := tail & r.mask
@@ -58,10 +56,12 @@ func (r *RingBuffer[T]) Dequeue() (res T, ok bool) {
 	return res, true
 }
 
-// Len returns number of items currently in the buffer.
+// Len returns number of items in the buffer.
 func (r *RingBuffer[T]) Len() int {
 	return int(atomic.LoadUint64(&r.tail) - atomic.LoadUint64(&r.head))
 }
+
+// Cap returns logical buffer capacity.
 func (r *RingBuffer[T]) Cap() int {
-	return int(r.size)
+	return len(r.data)
 }

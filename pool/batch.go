@@ -1,15 +1,14 @@
-// Package pool — zero-alloc batching without locks.
+// File: pool/batch.go
 // Author: momentics <momentics@gmail.com>
-// License: Apache-2.0
 //
-// High-performance zero-copy batch of api.Buffer objects.
-// This implementation is NOT thread-safe and avoids mutex in hot-path.
+// High-performance, zero-alloc batch of api.Buffer (or generic batches).
+// Thread-safety: not safe for concurrent mutation.
 
 package pool
 
 import "github.com/momentics/hioload-ws/api"
 
-// BufferBatch is a minimal zero-alloc batch of api.Buffer.
+// BufferBatch implements zero-copy batch of api.Buffer objects.
 type BufferBatch struct {
 	buffers []api.Buffer
 }
@@ -36,14 +35,10 @@ func (b *BufferBatch) Get(idx int) api.Buffer {
 	return b.buffers[idx]
 }
 
-// Slice returns zero-copy sub-batch [start:end).
+// Slice returns a zero-copy sub-batch [start:end).
 func (b *BufferBatch) Slice(start, end int) *BufferBatch {
-	return &BufferBatch{buffers: b.buffers[start:end]}
-}
-
-// Underlying returns the underlying slice.
-func (b *BufferBatch) Underlying() []api.Buffer {
-	return b.buffers
+	sub := b.buffers[start:end]
+	return &BufferBatch{buffers: sub}
 }
 
 // Split divides the batch at idx into two sub-batches.
@@ -51,7 +46,12 @@ func (b *BufferBatch) Split(idx int) (first, second *BufferBatch) {
 	return &BufferBatch{buffers: b.buffers[:idx]}, &BufferBatch{buffers: b.buffers[idx:]}
 }
 
-// Reset clears the batch retaining underlying buffer.
+// Underlying returns the underlying buffer slice.
+func (b *BufferBatch) Underlying() []api.Buffer {
+	return b.buffers
+}
+
+// Reset clears the batch retaining the underlying memory.
 func (b *BufferBatch) Reset() {
 	b.buffers = b.buffers[:0]
 }
