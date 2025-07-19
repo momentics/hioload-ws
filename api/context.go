@@ -1,18 +1,32 @@
 // Package api
-// Author: momentics@gmail.com
+// Author: momentics
 //
-// Extensible, typed execution context.
+// Strongly typed, extensible context contract with explicit key scoping and
+// cross-layer propagation control for high-performance workflows.
+// Not compatible or substitutable with standard context.Context.
 
 package api
 
-// Context is a key-value, type-safe execution context.
+// Context provides a lightweight key-value store with explicit propagation semantics.
 type Context interface {
-    // Set sets a value with given key.
-    Set(key string, value any)
-    // Get retrieves a value by key.
+    // Set assigns a value for a key, optionally marking it as propagated.
+    Set(key string, value any, propagated bool)
+
+    // Get fetches a value, returning (value, exists).
     Get(key string) (any, bool)
-    // Delete removes a key.
+
+    // Delete removes a value/key.
     Delete(key string)
-    // Clone creates a shallow copy.
+
+    // Clone returns a shallow copy of the context suitable for child operations.
     Clone() Context
+
+    // WithExpiration sets a TTL for key(s), notifying on expiry.
+    WithExpiration(key string, ttlNanos int64)
+
+    // IsPropagated checks if a key is marked for propagation.
+    IsPropagated(key string) bool
+
+    // Keys returns all present keys.
+    Keys() []string
 }

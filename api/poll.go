@@ -1,16 +1,18 @@
 // Package api
-// Author: momentics@gmail.com
+// Author: momentics
 //
-// Event loop & poll-mode interfaces (DPDK-like strategies).
+// High-performance, DPDK-style poll event loop abstraction able to batch and source events from multiple providers.
 
 package api
 
-// Poller represents an active poll-mode event source/consumer.
+// Poller represents a poll-mode reactor for high-rate event processing.
 type Poller interface {
-    // Poll processes up to maxEvents, returns number processed.
+    // Poll handles up to maxEvents; returns number processed and error.
     Poll(maxEvents int) (handled int, err error)
-    // Register adds a new handler to the poll queue.
+
+    // Register adds a handler to this poller (atomic when in batch).
     Register(h Handler) error
-    // Unregister removes a handler from the poll queue.
+
+    // Unregister removes a handler.
     Unregister(h Handler) error
 }

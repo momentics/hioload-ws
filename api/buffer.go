@@ -1,26 +1,49 @@
 // Package api
-// Author: momentics@gmail.com
+// Author: momentics
 //
-// Zero-copy buffer, segment and allocator abstractions.
+// Zero-copy memory buffer and NUMA-aware pooling for high-performance IO.
+//
+// Buffers may be hugepages, mmap, shared memory, or device-backed memory.
+// All operations must be zero-copy unless Copy is explicitly called.
 
 package api
 
-// Buffer is a zero-copy, sliceable memory region.
+// Buffer describes a resliceable, reference-counted memory region.
 type Buffer interface {
-    // Bytes returns a view of buffer contents.
+    // Bytes returns an immutable view of the current buffer data.
     Bytes() []byte
-    // Slice returns a sub-buffer.
+
+    // Slice produces a sub-buffer in O(1), memory-safe fashion.
     Slice(from, to int) Buffer
-    // Release deallocates the buffer.
+
+    // Release returns the buffer (and underlying region) to its pool.
+    // After Release, buffer must not be used.
     Release()
-    // Copy returns deep copy as byte slice.
+
+    // Copy returns a deep copy of buffer contents as a standalone []byte.
     Copy() []byte
+
+    // NUMANode returns the NUMA node this buffer was allocated from.
+    NUMANode() int
 }
 
-// BufferPool manages reusable buffer regions.
+// BufferPool abstracts memory region management for buffers.
 type BufferPool interface {
-    // Get allocates a buffer of at least size bytes.
-    Get(size int) Buffer
-    // Put releases buffer back to pool.
+    // Get returns a buffer sized at least 'size' bytes.
+    // Always NUMA-aware: should satisfy locality preference if possible.
+    Get(size int, numaPreferred int) Buffer
+
+    // Put returns buffer to pool; buffer must not be used afterwards.
     Put(b Buffer)
+
+    // Stats exposes resource/accounting metrics for observability.
+    Stats() BufferPoolStats
+}
+
+// BufferPoolStats aggregates buffer allocation/reuse stats.
+type BufferPoolStats struct {
+    TotalAlloc int64
+    TotalFree  int64
+    InUse      int64
+    NUMAStats  map[int]int64
 }

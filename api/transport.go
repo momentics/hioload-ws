@@ -10,20 +10,23 @@ package api
 type Transport interface {
     // Send pushes a set of buffers in zero-copy/batched fashion.
     Send(buffers [][]byte) error
+
     // Recv fetches the next batch/set of buffers.
     Recv() ([][]byte, error)
+
     // Close tears down transport and releases all resources.
     Close() error
+
     // Features returns the transport's capabilities (zero-copy, batching, NUMA-affinity, etc).
     Features() TransportFeatures
 }
 
 // TransportFeatures describes special capabilities of the underlying transport.
 type TransportFeatures struct {
-    ZeroCopy      bool
-    Batch         bool
-    NUMAAware     bool
-    LockFree      bool
-    SharedMemory  bool
-    OS            []string // Supported OSes
+    ZeroCopy     bool
+    Batch        bool
+    NUMAAware    bool
+    LockFree     bool
+    SharedMemory bool
+    OS           []string // Supported OSes
 }

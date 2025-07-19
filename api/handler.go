@@ -1,12 +1,12 @@
 // Package api
-// Author: momentics@gmail.com
+// Author: momentics
 //
-// Generic event/data handler.
+// Strongly typed, modular handler contract for events, batches, or messages.
 
 package api
 
-// Handler processes events/batches from Poller/Transport.
+// Handler processes events or data batches.
 type Handler interface {
-    // Handle processes provided data.
+    // Handle processes provided event/data; error policy configurable by middleware.
     Handle(data any) error
 }

@@ -1,21 +1,21 @@
 // Package api
-// Author: momentics@gmail.com
+// Author: momentics
 //
-// Testing and mocking primitives for core abstractions.
+// Mock/testing utilities for all core contracts; extendable for new interfaces.
 
 package api
 
-// MockTransport is a test-oriented replacement for Transport.
+// MockTransport is a test and mock-friendly implementation of Transport.
 type MockTransport struct {
-    SendFunc func([][]byte) error
-    RecvFunc func() ([][]byte, error)
-    CloseFunc func() error
+    SendFunc     func([][]byte) error
+    RecvFunc     func() ([][]byte, error)
+    CloseFunc    func() error
     FeaturesFunc func() TransportFeatures
 }
 
-func (m *MockTransport) Send(b [][]byte) error                 { return m.SendFunc(b) }
-func (m *MockTransport) Recv() ([][]byte, error)               { return m.RecvFunc() }
-func (m *MockTransport) Close() error                          { return m.CloseFunc() }
-func (m *MockTransport) Features() TransportFeatures           { return m.FeaturesFunc() }
+func (m *MockTransport) Send(b [][]byte) error           { return m.SendFunc(b) }
+func (m *MockTransport) Recv() ([][]byte, error)         { return m.RecvFunc() }
+func (m *MockTransport) Close() error                    { return m.CloseFunc() }
+func (m *MockTransport) Features() TransportFeatures     { return m.FeaturesFunc() }
 
-// Add more test/mocking helpers as needed...
+// Extend with mocks for all additional core contracts as architecture evolves.

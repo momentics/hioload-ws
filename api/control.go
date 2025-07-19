@@ -1,18 +1,21 @@
 // Package api
-// Author: momentics@gmail.com
+// Author: momentics
 //
-// Control plane for configuration, stats, and live reconfiguration.
+// Runtime configuration, statistics, and dynamic reload contract for highload systems.
 
 package api
 
-// Control exposes API for runtime configuration and metrics.
+// Control exposes configuration and live metrics API for runtime systems.
 type Control interface {
-    // GetConfig returns current config snapshot.
+    // GetConfig returns a snapshot of all configuration settings.
     GetConfig() map[string]any
-    // SetConfig updates config.
+
+    // SetConfig atomically updates or merges configuration settings.
     SetConfig(cfg map[string]any) error
-    // Stats returns current performance metrics.
+
+    // Stats returns current aggregated runtime and performance metrics.
     Stats() map[string]any
-    // OnReload registers reload hook.
+
+    // OnReload registers a callback for hot-reload/config updates.
     OnReload(fn func())
 }

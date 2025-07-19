@@ -1,22 +1,24 @@
 // Package api
-// Author: momentics@gmail.com
+// Author: momentics
 //
-// Generic result, error propagation and cancellation.
+// Composable, strongly typed async result and cancellation primitives.
 
 package api
 
-// Result wraps any payload or error.
+// Result wraps any value or error for composable/async calls.
 type Result[T any] struct {
     Value T
     Err   error
 }
 
-// Cancelable is any operation that may be canceled.
+// Cancelable defines contract for cancelable async operations.
 type Cancelable interface {
-    // Cancel attempts to abort the operation.
+    // Cancel aborts the operation if still pending.
     Cancel() error
-    // Done signals completion/cancellation.
+
+    // Done returns a channel closed when operation completes or is canceled.
     Done() <-chan struct{}
-    // Err returns cancellation reason.
+
+    // Err returns cancellation or completion reason.
     Err() error
 }
