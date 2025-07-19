@@ -1,367 +1,258 @@
 # hioload-ws
 
-High-Performance, NUMA-Aware, Zero-Copy WebSocket Library Skeleton for Go
+**Ultra-High-Performance NUMA-Aware Zero-Copy WebSocket Library for Go**
 
 ---
 
-**Author:** momentics <momentics@gmail.com>
+**Author:** momentics <momentics@gmail.com>  
+**License:** Apache 2.0  
 
 ---
 
 ## Overview
 
-`hioload-ws` delivers a powerful and extensible foundation for building ultra-high-performance WebSocket servers and networking infrastructure in Go. Designed to embrace advances in modern hardware, kernel, and software best practices, this project focuses on scalable event-driven processing, memory locality, and minimizing latency under extreme loads. Its clean architecture and robust abstractions enable direct integration of core DPDK/HiPerf strategies: zero-copy, NUMA-awareness, affinity, batch-processing, lock-free data flow, as well as compatibility with both mainstream and advanced OS environments.
+`hioload-ws` is a cross-platform, production-grade, extensible skeleton for building ultra-performing WebSocket and custom network servers in Go. The project fuses best-in-class approaches from DPDK-like data plane architectures—zero-copy, NUMA-awareness, affinity, batch-processing, lock-free data structures—with scalable event-driven design. It is crafted for maximum throughput, lowest possible latency, and industrial integrity when serving millions of concurrent connections on modern Linux or Windows servers.
 
-The repository targets backend developers, system programmers, and architects seeking a reliable starting point for custom WebSocket/real-time networking solutions demanding the lowest possible overhead and the highest levels of performance—whether as the foundation for production messaging platforms or for research into future state-of-the-art network stack patterns.
+This repository targets backend engineers, distributed-systems architects, and hardware-oriented developers needing extreme performance and resource efficiency (RAM/CPU per connection) combined with architectural modularity and testability—whether for powering messaging infrastructure, cloud backends, edge gateways, or research prototypes.
 
 ---
 
 ## Features
 
-- **Poll-mode network IO** 
-  Leverages poll-based eventing (epoll/io_uring/IOCP) for highly scalable, event-driven network concurrency. Avoids thread-per-connection models and blocks for optimal CPU resource utilization.
+- **Zero-Copy Data Path**
+  - Buffers are always managed via NUMA-aware pools.
+  - Send/receive methods operate in batch, directly referencing pooled memory.
+  - All framed protocol operations are zero-alloc and zero-copy by design.
 
-- **NUMA-aware memory and buffer management** 
-  Architectural primitives for segmenting object and byte pools by NUMA node or CPU core, greatly improving cache locality and throughput on servers with many sockets/cores.
+- **NUMA Awareness and Locality**
+  - Pools and executors can be instantiated per NUMA node or CPU.
+  - Transport/buffer layers offer thread/core/Numa pinning to minimize cross-node traffic.
+  - Memory and connection pools are segmented for strict data locality.
 
-- **Zero-copy data paths** 
-  Skeletal support for minimizing memory copying* between application and kernel or system layers, paving the way for hardware offload, DPDK and io_uring-based transport, and absolute minimization of latency.
+- **Batching and Poll-Mode IO**
+  - Pollers and reactors operate in batch, receive/send up to N frames/packets at once.
+  - Event loops avoid thread-per-connection; all IO is poll-driven (epoll, IOCP, future io_uring).
+  - Offers easy extension to DPDK/XDP/AF_XDP/container native deployment models.
 
-- **Clean layered architecture** 
-  Designed around interchangeable, testable abstractions: clear separations between reactor/event loops, networking, protocol framing, pooling, and external integrations.  
-  Encourages best practices in dependency management, code clarity, and future extendibility.
+- **Lock-Free and Wait-Free Critical Path**
+  - Ring buffers, queues, and handler registries are lock-free to avoid contention and context switches.
+  - Event loops implement adaptive spin-wait backoff, replacing traditional mutexes.
 
-- **Lock-free/wait-free concurrency control** 
-  Optimized data path for high concurrency scenarios; avoids performance pitfalls from memory contention and unnecessary locking.
+- **Transport Flexibility**
+  - Unified transport abstraction covering standard sockets, DPDK, io_uring, and Windows IOCP.
+  - OS detection and conditional compilation for full cross-platform compatibility.
 
-- **Batching, prefetch, and CPU affinity** 
-  Base abstractions for batching IO and compute tasks, data prefetching optimizations, and robust structuring for cross-platform CPU pinning/affinity configuration.
+- **Extensible Pool/Buffer and Reactor Interfaces**
+  - Modular, strongly validated contracts for buffer pools, executors, pollers.
+  - All interfaces documented and engineered for mocking and fast development.
+  - Seamless switch between production-grade and test/mock components.
 
-- **Modular integration of best-in-class network technologies** 
-  Easily infuses custom logic, DPDK/DPDK-like networking, true io_uring/zero-copy backends, or custom high-performance allocators with minimal changes in user-level code.
+- **Advanced Testing/Mock/Profiling Integrations**
+  - Fakes for all core interfaces, enabling deep unit and integration testing.
+  - Runtime metrics, hot-reload config, and debug probes for live observability.
 
-- **Mock/fake development and full testability** 
-  Mock modules and test/fake implementations are first-class citizens, making it trivial to unit or integration test every interface and architectural layer in isolation.
-
-- **Professional code comments and documentation** 
-  Every source file and interface is thoroughly commented in clear English with carefully explained domain context, promoting codebase longevity, transparency, and ease of onboarding.
+- **English Language Documentation and Inline Comments**
+  - Every source file features detailed English commentary explaining domain logic.
+  - Multi-level README structure for onboarding, architecture, and system integration.
 
 ---
 
 ## Table of Contents
 
-- [Project Vision](#project-vision)
+- [Project Goals](#project-goals)
+- [Design Principles](#design-principles)
 - [System Requirements](#system-requirements)
-- [Directory Structure](#directory-structure)
-- [Detailed Layer and Directory Outline](#detailed-layer-and-directory-outline)
-    - [API Layer: `/api/`](#api-layer-api)
-    - [Reactor/Event Loop: `/reactor/`](#reactorevent-loop-reactor)
-    - [Pooling: `/pool/`](#pooling-pool)
-    - [Networking/Transport: `/transport/`](#networkingtransport-transport)
-    - [WebSocket Protocol / Framing: `/protocol/`](#websocket-protocol--framing-protocol)
-    - [Mocks/Fakes: `/fake/`](#mocksfakes-fake)
-    - [Examples: `/examples/`](#examples-examples)
-- [Zero-Copy, NUMA, and Poll Mode Support](#zero-copy-numa-and-poll-mode-support)
-- [Integration & Extending for Production](#integration--extending-for-production)
+- [Directory Overview](#directory-overview)
+- [Component Breakdown](#component-breakdown)
 - [Quick Start & Usage](#quick-start--usage)
-- [Testing](#testing)
-- [Best Practices and Integration Patterns](#best-practices-and-integration-patterns)
-- [Limitations & Roadmap](#limitations--roadmap)
-- [License & Contribution](#license--contribution)
-- [Author & Credits](#author--credits)
+- [Testing and Best Practices](#testing-and-best-practices)
+- [License & Notices](#license--notices)
+- [Roadmap & Contribution](#roadmap--contribution)
+- [Frequently Asked Questions](#frequently-asked-questions)
 
 ---
 
-## Project Vision
+## Project Goals
 
-hioload-ws addresses the needs of organizations and communities operating ultra-high-load, latency-critical networking workloads. The project’s guiding goal is to empower Go programmers to implement robust, extreme-throughput WebSocket and binary protocol backends that exploit modern CPU architectures (multi-core, NUMA, cache lines), kernel innovations (zero-copy, io_uring, huge pages), and distributed event-processing patterns without being locked in to a specific technology or hardware vendor.
+hioload-ws was conceived to answer the needs of organizations and independent developers running the world’s largest, most latency-sensitive networking workloads. Core objectives:
 
-This repository is not a monolithic library or application—but a *framework skeleton* for building production or research-grade protocols. It encourages learning and experimentation with next-generation software patterns for cloud, bare-metal, and edge system deployment.
+- **Exploit full modern hardware capabilities**: multi-core, NUMA, hugepages, kernel zero-copy, and affinity.
+- **Expose a clean, extensible interface spanning all performance-critical domains**: pooling, reactor, handler, protocol, transport.
+- **Guarantee production observability and testability** without sacrificing throughput.
+- **Offer easy extensibility** for adding advanced transports (DPDK/io_uring), metrics, and session/state management.
+
+---
+
+## Design Principles
+
+- **Zero-copy from transport to protocol**: pool-backed, page-aligned buffer management everywhere.
+- **NUMA and affinity first**: explicit CPU/NUMA assignment and memory partitioning.
+- **Event loop-centric model**: Poll-mode service, batched dispatch, minimal per-connection Syscalls.
+- **Lock-free/wait-free concurrency**: no blocking Mutexes in hotpaths.
+- **Testable, replaceable, auditable**: each component is an interface, mockable for CI/CD.
+- **Professional, clear English documentation**: code and comments readable by SREs and systems architects worldwide.
 
 ---
 
 ## System Requirements
 
-- Go 1.21 or newer.
-- Linux (kernel 6.20+) or Microsoft Windows Server 2016+.
-- Minimum one modern multi-core CPU. For NUMA-aware and huge-page features, a system with multiple CPU sockets and NUMA nodes is recommended but not mandatory.
-- No nonstandard Go dependencies in the codebase skeleton; new modules can be added as needed.
-
-For full exploitation of features like io_uring, DPDK, or extensive NUMA segmentation, root/admin privileges and platform-specific setup may be required.
+- **Go version:** 1.21 or above (1.23 recommended for stability and performance).
+- **Operating Systems:** Linux (kernel 6.20+ preferred for io_uring), Windows Server 2016 or later.
+- **CPU:** Modern x86_64/amd64 with multi-core, NUMA (for production deployments).
+- **Optional:** DPDK or io_uring libraries for cutting-edge transport integration.
 
 ---
 
-## Directory Structure
+## Directory Overview
 
-| Directory           | Description                                                             |
-|---------------------|-------------------------------------------------------------------------|
-| `/api/`             | Public API interfaces for all top-level abstractions                    |
-| `/reactor/`         | Event-loop, poll-mode reactor logic, NUMA-awareness                     |
-| `/pool/`            | Object and byte pools (NUMA/thread-aware, lock-free patterns)           |
-| `/transport/`       | Network transport abstractions, interface to underlying sockets         |
-| `/protocol/`        | WebSocket framing, parsing, binary/text decoding                        |
-| `/fake/`            | Fully testable mock/fake implementations for unit and integration tests |
-| `/examples/`        | Real-life and test applications: echo server, WSS, stress, telemetry    |
-| `README.md`         | Main documentation (this file)                                          |
-| `go.mod`            | Go Modules definition, cross-package dependency manager                 |
-
----
-
-## Detailed Layer and Directory Outline
-
-### API Layer: `/api/`
-
-- Contains all public and internal **interfaces** for system primitives:
-    - `Reactor`: core event-loop interface for poll-mode dispatching of connections (epoll, io_uring, kqueue, IOCP, etc).
-    - `NetConn`: abstract raw or TLS socket, decoupled from Go stdlib types.
-    - `BytePool`, `ObjectPool`: abstractions for zero-copy buffer management and pooled objects.
-    - `NumaPoolManager`: topology-aware pool manager for NUMA/core/cpuset segregation.
-    - `WebSocketConn`, `WebSocketFrame`: minimal WebSocket protocol framing and parsing contract.
-
-- Interfaces are strictly documented in English, outlining responsibilities, expected object ownership, and guarantees.
-
-- Isolation of contracts allows seamless patching, swapping, or extension without violating core architecture or introducing regressions.
+| Directory           | Description                                                      |
+|---------------------|------------------------------------------------------------------|
+| `/api/`             | Public interfaces (buffer pool, reactor, handler, transport, etc.)   |
+| `/adapters/`        | Glue layers adapting internal logic to API contracts             |
+| `/internal/`        | System-specific, performance-critical implementations            |
+| `/pool/`            | Object and byte pools, lock-free ring buffers, batching          |
+| `/transport/`       | High-speed, zero-copy transport adapters for OS/hardware         |
+| `/protocol/`        | WebSocket protocol, framing, parsing, (zero-copy everywhere)     |
+| `/session/`         | NUMA- and concurrency-aware session/context management           |
+| `/control/`         | Config, live metrics, hot-reload, hooks, debug/probes            |
+| `/examples/`        | Realistic echo server, fake/mock-based tests, stress suites      |
+| `/benchmarks/`      | Performance measurement and regression tracking                  |
+| `/tests/`           | Automated integration testing, system-level correctness checks   |
+| `/fake/`            | Mock/fake implementations for every interface and layer          |
 
 ---
 
-### Reactor/Event Loop: `/reactor/`
+## Component Breakdown
 
-- Comprises event loop and poller logic; implements glue for connection lifecycle and event handling.
-- Heart of the polling (poll-mode) model: aims for single-threaded highly scalable dispatch with optional multi-reactor (one per NUMA node or CPU group).
-- Links to pool, protocol, and transport via interfaces only. Platform-dependent implementations (e.g., io_uring, epoll, IOCP) can be swapped or independently developed.
-- Example: NUMA/opinionated scheduling with worker pinning and affinity.
-- Base stub/fake reactor included for testing; production logic is pluggable.
+### Core Interfaces (`/api/`)
 
----
+- **Buffer/BufferPool:** Page-based, NUMA-aware, reference-counted memory management.
+- **Transport:** Zero-copy, batch-oriented sender/receiver for network communication.
+- **Poller/Reactor:** DPDK/NAPI-style reactor pattern, high-rate/conflict-free handler dispatch.
+- **Handler/Batch:** Typed, modular data/event processing (pluggable middleware).
+- **Executor/ThreadPool:** NUMA- and concurrency-aware background task runner.
+- **Affinity:** CPU and NUMA pinning with runtime reconfiguration.
+- **Control:** Hot-reload configuration registry (atomic snapshot), runtime metrics, debug probes.
+- **Ring:** Lock-free FIFO for high-throughput message passing between goroutines and threads.
+- **Scheduler:** High-res timer/event scheduling, all cancelable.
 
-### Pooling: `/pool/`
+### Internal and Pool Implementations
 
-- Lock-free and wait-free object/byte pool implementations that can be NUMA-, CPU- or thread-local.
-- Ensures highest memory locality and nearly GC-free operation for short-lived, high-churn objects (frames, buffers, state structs).
-- Zero-copy models use these pools to acquire/return all working buffers, avoiding memory churn and improving performance.
-- Simple implementations (channel-based, `sync.Pool`-based) included for clarity; further custom or hardware-accelerated pools can be introduced without breaking API.
+- **RingBuffer:** Fast, lock-free array-based ring buffer for inter-thread/goroutine transfer.
+- **Batch:** Non-allocating wrapper over slices for batch traversal and split/slice ops.
+- **BufferPoolManager:** Segments buffer pools by NUMA node—fast O(1) get/put memory regions.
 
----
+### Transport & Reactor
 
-### Networking/Transport: `/transport/`
+- **Linux (epoll, SendmsgBuffers):** Kernel sockets, zero-copy batch using slices, extensible for io_uring in the future.
+- **Windows (WSASend/Recv, IOCP):** Overlapped IO, batch-capable, direct use of system handles.
+- **Cross-platform transport registry:** Conditional compilation, safe instantiation, and feature query everywhere.
 
-- Pure Go network connection logic abstracted over `net.Conn` with support for advanced object pool buffering.
-- Prepares the ground for custom, DPDK/io_uring-based, or userspace network stacks in production.
-- Defines the essential NetConn interface, with exemplary implementation wrapping the Go stdlib sockets and TLS, constructed to work with all system memory pools.
-- Optimized for clean, deadlock-free use in reactor event loops and frame handlers.
+### Protocol
 
----
-
-### WebSocket Protocol / Framing: `/protocol/`
-
-- Minimal, extensible framing logic for WebSocket as per RFC6455: frame headers, masking/unmasking, payload, message fetch, and ping/pong/close support.
-- Built for zero-copy: frame struct always refers to memory buffers managed by pools; message lifetimes are well-defined; buffer ownership is explicit.
-- Provides primitives to build further application-layer logic (message aggregation, fragmentation, compression, subprotocols).
-- Serves as model/code base for implementing custom binary protocols with similar architectural requirements.
-
----
-
-### Mocks/Fakes: `/fake/`
-
-- Foundational stubs, fakes, and mock implementations for test-driven development and CI/CD.
-- Every interface in `/api/` is covered by a minimal fake object: predictable, no-op behavior for buffer pools, reactors, transport, protocol, and more.
-- Used both in standalone unit tests and as injectables for application-level testing in `/examples/`.
-- Allows rapid prototyping, safe regression testing, and verification of system-wide invariants.
-
----
-
-### Examples: `/examples/`
-
-A suite of self-contained Go programs demonstrating real-world and edge-case uses of the library:
-
-- **Echo Server**: A basic WebSocket echo demonstrating the full pipeline with pool-backed transport and protocol logic.
-- **WSS (TLS) Secure Server & Client**: Showcases production-grade TLS + WebSocket integration—complete with buffer pooling and certificate validation.
-- **Benchmark / Load Generation**: (planned) Multiclient simulators and stress tools to profile server performance, correctness, and tail latency.
-- **Broadcast, Chat, PubSub**: (planned) Simulate clustered stateful messaging with subscriber sets.
-- **Reverse Proxy**: (planned) High-performance WebSocket proxy, transparent tunneling, or multiplexing scenarios.
-- **Telemetry & Diagnostics Dashboard**: (planned) Live metrics, NUMA node resource visualization, object pool statistics, and system health reporting.
-- **Fault/Edge Case Testers**: (planned) Robustness, hard disconnects, protocol abuse, fuzzing web clients for error path validation.
-
----
-
-## Zero-Copy, NUMA, and Poll Mode Support
-
-hioload-ws is structured to make the most of the following advanced techniques and hardware/OS features:
-
-### Zero-Copy Data Flows
-
-- All payload buffers are managed by explicit pools.
-- Frame structs manipulate only references—never copies—and buffer ownership is rigidly scoped (never passed to GC).
-- Networking and IO APIs are designed for immediate compatibility with kernel-accelerated zero-copy (e.g., `sendfile`, `io_uring`, kernel buffer registration).
-
-### NUMA-Awareness
-
-- Pool managers and reactors can be instantiated per NUMA node or CPU set.
-- Connections, reactors, and object pools can be pinned, minimizing remote memory access, thus reducing cross-chip data transfer bottlenecks.
-- Internal stubs for NUMA and affinity logic allow straightforward integration of system utilities (`numactl`, CPU lists, explicit core mapping) in real deployments.
-
-### Poll Mode (Polling) Eventing
-
-- Event loops are implemented in poll-mode (no blocking per connection, no syscall per event).
-- Multiple reactors per hardware NUMA socket/CPU are supported for scale-out.
-- Go runtime uses poll internally for concurrency; the skeleton exposes how to extend this to build true C10M-class servers.
-
----
-
-## Integration & Extending for Production
-
-hioload-ws does not enforce any “one true stack”—developers are empowered to adapt or replace any module for:
-
-- DPDK or netmap-based packet IO for cut-through data path and hardware offload.
-- Kernel-bypass stacks for extreme throughput scenarios.
-- Pinning and NUMA-aware resource management at the application or container orchestration level.
-- New protocols, stateful messaging, and hybrid binary/data formats.
-- Secure (TLS) in-place upgrade and certificate reloading for long-lived applications.
-
-All source code is designed to enable this flexibility, without sacrificing code clarity or future maintainability.
+- **WebSocket frame encode/decode**: Strict RFC6455, masking/unmasking, header/payload, direct buffer references.
+- **Frame parsing**: Zero-allocation, zero-copy, all payload slices reference pooled memory.
+- **Pluggable protocol actions**: Simple extension for ping/pong, control frames, and future extensions (compression, multiplexing).
 
 ---
 
 ## Quick Start & Usage
 
-### 1. Clone the repository
+### Clone and Build
 
 ```
 
 git clone https://github.com/momentics/hioload-ws.git
 cd hioload-ws
+go mod tidy
 
 ```
 
-### 2. Build and run tests
+### Run Tests
 
 ```
 
 go test ./...
 
 ```
-All package and integration tests (using mocks and supplied infrastructure) will run and validate project integrity.
 
-### 3. Launch the Echo Server Example
+### Start an Example Server
 
 ```
 
 go run ./examples/echo/main.go
 
-```
-- The server will listen on `:9001` and respond with an echo for each received message.
-- Connect with a WebSocket client of your choice (`wscat`, `websocat`, Postman, browser JS, etc.), e.g.:
-```
-
-wscat -c ws://localhost:9001
+# Connect with any ws-compatible client (browser, wscat, websocat, etc.)
 
 ```
-
-### 4. Run the Secure WSS Example (if available)
-
-```
-
-go run ./examples/wss/server.go
-
-```
-and in a separate terminal:
-```
-
-go run ./examples/wss/client.go
-
-```
-Refer to `/examples/wss/README.md` for certificate generation steps and usage.
 
 ---
 
-## Testing
+## Testing and Best Practices
 
-- All interfaces, pools, and reactors have injectable mock/fake layers for unit and integration tests.
-- Write new tests simply by using fakes from `/fake/`, giving full control over memory, connection, and event lifecycle.
-- For extensive testing, extend `/examples/` with stress or edge-case scenarios; test both production and experimental code branches.
-
----
-
-## Best Practices and Integration Patterns
-
-hioload-ws is a starting point for industrial-grade, performance-sensitive Go networking codebases. The following practices are recommended:
-
-- **Always acquire and release buffers via pool objects**; never allocate temporary slices in hot-data paths or protocol loops.
-- **Pin worker goroutines to specific CPUs for best NUMA performance**; ensure that each reactor reads from its own set of event sources and object pools.
-- **Favor batching and prefetch in network IO and protocol serialization**; minimize context switches and system call frequency.
-- **Cleanly separate eventing, protocol parsing, and user logic with explicit interfaces.**
-- **Write and run integration tests using fakes/mocks** before deployment with real network sockets.
-- **Use platform-specific tools** (`numactl`, `taskset`, etc.) for performance investigations and affinity tuning.
+- Use provided fakes/mocks for unit tests on every public interface.
+- Always obtain buffers via pool (`Get(size, numa)`), release with `Release()`—never allocate []byte directly in hot path.
+- Prefer batch transport methods, not per-message send; use slice-based batch ops for throughput.
+- Pin event loops/reactors and executors per NUMA region for best cache locality.
+- Use debug probes, metrics registry, and live config reload for tuning in production.
 
 ---
 
-## Limitations & Roadmap
+## License & Notices
 
-### Why this skeleton?
+hioload-ws is licensed under the Apache License, Version 2.0.  
+NOTICE and LICENSE files include a summary of all included third-party components (MIT, BSD) and special attributions.
 
-hioload-ws is designed as a deeply commented and flexible reference point—not a drop-in one-size-fits-all “magic” library. Features like full WebSocket compliance, authentication, advanced binary codecs, and reliability patterns (reconnect, backpressure, dynamic scaling) are **not** implemented by default, to keep architectural surfaces clean and focused.
+### License summary:
 
-### Planned and Suggested Extensions
-
-- Advanced real poll-mode event loops: pure Go io_uring, custom epoll driver, Windows IOCP integration
-- DPDK, XDP, AF_XDP kernel-bypass net backend integration
-- Heapless allocations: custom, hugepage-oriented allocators for frame and message buffering
-- Full RFC6455 protocol compliance (including pipelining, fragmentation, masking)
-- Out-of-the-box metrics and live profiling integration for performance debugging in prod
-- Rich telemetry and debugging hooks for production troubleshooting
-- Example-driven guides for integration with Kubernetes/Cloud deployments
-- Multi-tenant messaging, sharding, or "broadcast storm" demos for Internet-scale messaging
+- **hioload-ws core:** Apache 2.0
+- **github.com/eapache/queue:** MIT License (included via Go Modules)
+- **golang.org/x/sys:** BSD-like License (included via Go Modules)
+- No GPL/LGPL copyleft code; all dependencies are compatible and vetted.
 
 ---
 
-## License & Contribution
+## Roadmap & Contribution
 
-hioload-ws is available under the Apache 2.0 License: see `LICENSE` in the repository root for full text.
+Future work will focus on:
 
-**Contributions are welcome!**  
-Open issues, feature proposals, and pull requests to drive the project forward are invited. All architectural discussion, code review suggestions, and production bugfixes are encouraged—especially those accelerating state-of-the-art or enabling new deployment paradigms.
+- Full io_uring and DPDK transport extensions.
+- Advanced NUMA-based buffer reuse and buffer cache tuning.
+- Autoscaling/reactor rebalance scheduling.
+- Protocol extensibility (compression, multiplex, HTTP2 upgrades).
+- Richer metrics/telemetry and built-in live admin APIs.
+- Open integration interfaces for shared memory, RDMA, and kernel-bypass transports.
+- Sample deployments for Kubernetes/bare-metal scaling/edge.
 
-All code contributions should include clear ownership, documentation, and focus on interoperability and maintainability.  
-For large refactoring or integration of new poll-mode/zero-copy tech, please open an issue first to discuss general design and roadmap fit.
+Contributions are welcome!  
+Open PRs, discuss features, file bugs, and prototype blueprints in the GitHub repository.
+
+---
+
+## Frequently Asked Questions
+
+**Q: Is this library "production-ready"?**  
+A: This repository is an advanced skeleton, architected for production—but not a monolithic drop-in for all use-cases. Deployment, protocol policy, security, and low-level tuning are up to integrators.
+
+**Q: Does it require DPDK/io_uring?**  
+A: No. All core components work on standard kernels with or without advanced backends.
+
+**Q: Is Windows supported?**  
+A: Yes. All modern Windows with IOCP and overlapped sockets.
+
+**Q: How are dependencies managed?**  
+A: Go Modules with full version pinning and auditing in LICENSE/NOTICE.
+
+**Q: Where to find more usage/extension examples?**  
+A: See `/examples/`, detailed file headers, and open community discussions on GitHub.
 
 ---
 
 ## Author & Credits
 
-**Developed and maintained by:**  
-momentics <momentics@gmail.com>
-
-**Special thanks:**  
-The Go community, DPDK and io_uring maintainers, and the open source network programming ecosystem for ideas, tools, and feedback inspiring the architecture of this repository.
+Developed and maintained by momentics <momentics@gmail.com>  
+Special thanks to the Go, DPDK, and io_uring communities for foundational work and inspiration.
 
 ---
 
-## Appendix: Frequently Asked Questions
-
-### 1. How do I add my own protocol or custom logic?
-
-Implement corresponding interfaces from `/api/`, plug your code into the event loop, and use existing pool and transport abstractions for memory and connection handling.  
-Refer to `/examples/` for “bare metal” demo implementations.
-
-### 2. Where are the high-level application features (auth, broker, clustering)?
-
-hioload-ws intentionally avoids such features in the core skeleton to keep it maintainable and clean. These can be contributed as separate modules or companion projects built atop the provided framework.
-
-### 3. How do I integrate with DPDK or io_uring?
-
-Create a new module or implementation of the `Reactor`, `NetConn`, and `Pool` interfaces, leveraging hardware-accelerated libraries as needed.  
-See internal comments and watch for community branch development for examples.
-
-### 4. Is Windows supported?
-
-Yes. Most architectural patterns (poll-mode, pool, concurrency, NUMA) are available in modern Windows OS (Server 2016+), especially for IOCP and memory affinity features.
-
-### 5. Is code production-ready?
-
-The skeleton code is architected for production use but intended as a template for extension and adaptation, not as a drop-in production service. Security, roadmap protocols, and robustness for production deployments are the responsibility of downstream users and maintainers.
-
----
-
-For additional resources, up-to-date documentation, and advanced examples, visit the project page or open discussion threads.
-
----
+**For full technical and legal details, see [LICENSE](./LICENSE) and [NOTICE](./NOTICE) in the project root.**
