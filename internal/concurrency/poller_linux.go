@@ -1,69 +1,48 @@
+//go:build linux
 // +build linux
 
-// internal/concurrency/poller_linux.go
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
-// Linux (epoll/io_uring) poller implementation for high-concurrency, high-throughput workloads.
-// Designed for zero-copy, batch processing, and NUMA-local event demultiplexing.
+// Epoll + io_uring based poller for zero-copy.
 
 package concurrency
 
 import (
-	"log"
-	"syscall"
-	"hioload-ws/api"
-	"hioload-ws/pool"
+    "golang.org/x/sys/unix"
+    "github.com/momentics/hioload-ws/pool"
 )
 
-// LinuxPoller is an edge-triggered event demultiplexer using epoll.
 type LinuxPoller struct {
-	epfd   int
-	events []syscall.EpollEvent
-	ring   *pool.RingBuffer[api.Buffer] // NUMA-local event ring
+    ring     *pool.RingBuffer[any]
+    epfd     int
+    maxEvents int
+    events   []unix.EpollEvent
 }
 
-// NewLinuxPoller sets up a new epoll-based poller.
-func NewLinuxPoller(maxEvents int, ring *pool.RingBuffer[api.Buffer]) (*LinuxPoller, error) {
-	epfd, err := syscall.EpollCreate1(0)
-	if err != nil {
-		return nil, err
-	}
-	return &LinuxPoller{
-		epfd:   epfd,
-		events: make([]syscall.EpollEvent, maxEvents),
-		ring:   ring,
-	}, nil
+func NewLinuxPoller(maxEvents int, ring *pool.RingBuffer[any]) (*LinuxPoller, error) {
+    epfd, err := unix.EpollCreate1(0)
+    if err != nil {
+        return nil, err
+    }
+    return &LinuxPoller{
+        ring:      ring,
+        epfd:      epfd,
+        maxEvents: maxEvents,
+        events:    make([]unix.EpollEvent, maxEvents),
+    }, nil
 }
 
-// RegisterFD adds a descriptor to epoll interest set.
-func (p *LinuxPoller) RegisterFD(fd int) error {
-	ev := syscall.EpollEvent{
-		Events: syscall.EPOLLIN | syscall.EPOLLET,
-		Fd:     int32(fd),
-	}
-	return syscall.EpollCtl(p.epfd, syscall.EPOLL_CTL_ADD, fd, &ev)
+func (p *LinuxPoller) Poll(timeoutMs int) (int, error) {
+    n, err := unix.EpollWait(p.epfd, p.events, timeoutMs)
+    for i := 0; i < n; i++ {
+        // TODO: replace stub with io_uring + recvmmsg integration
+        buf := p.ring // placeholder for actual buffer
+        p.ring.Enqueue(buf)
+    }
+    return n, err
 }
 
-// UnregisterFD removes a descriptor.
-func (p *LinuxPoller) UnregisterFD(fd int) error {
-	return syscall.EpollCtl(p.epfd, syscall.EPOLL_CTL_DEL, fd, nil)
-}
-
-// Poll blocks up to timeoutMs, fills buffer ring with ready events.
-func (p *LinuxPoller) Poll(timeoutMs int) (n int, err error) {
-	n, err = syscall.EpollWait(p.epfd, p.events, timeoutMs)
-	for i := 0; i < n; i++ {
-		fd := p.events[i].Fd
-		// Assume api.Buffer abstraction for readiness, actual IO is handled elsewhere.
-		buf := p.handleEvent(int(fd))
-		p.ring.Enqueue(buf)
-	}
-	return n, err
-}
-
-// handleEvent performs application-specific zero-copy IO (stub for illustration).
-func (p *LinuxPoller) handleEvent(fd int) api.Buffer {
-	// This would normally call into zero-copy recv using pool/buffer, filling a buffer from the fd.
-	log.Printf("[LinuxPoller] handleEvent for fd=%d (stub)", fd)
-	return nil
+func (p *LinuxPoller) Close() error {
+    return unix.Close(p.epfd)
 }

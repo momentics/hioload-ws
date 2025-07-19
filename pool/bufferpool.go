@@ -1,10 +1,7 @@
-//go:build !linux && !windows
-// +build !linux,!windows
-
-// Package pool
+// pool/bufferpool.go
 // Author: momentics <momentics@gmail.com>
 //
-// Platform-independent NUMA-aware BufferPool dispatcher.
+// Cross-platform NUMA-aware BufferPool manager with transparent selection and trace.
 
 package pool
 
@@ -14,20 +11,17 @@ import (
 	"github.com/momentics/hioload-ws/api"
 )
 
-// BufferPoolManager chooses the correct NUMA BufferPool at runtime.
 type BufferPoolManager struct {
 	pools map[int]api.BufferPool
 	lock  sync.RWMutex
 }
 
-// NewBufferPoolManager returns a new pool manager for NUMA nodes.
 func NewBufferPoolManager() *BufferPoolManager {
 	return &BufferPoolManager{
 		pools: make(map[int]api.BufferPool),
 	}
 }
 
-// GetPool returns BufferPool for a given NUMA node, initializing it if needed.
 func (m *BufferPoolManager) GetPool(numaNode int) api.BufferPool {
 	m.lock.RLock()
 	pool, ok := m.pools[numaNode]
@@ -46,4 +40,4 @@ func (m *BufferPoolManager) GetPool(numaNode int) api.BufferPool {
 	return pool
 }
 
-// The real implementation of newBufferPool is provided in bufferpool_linux.go or bufferpool_windows.go.
+// Platform-specific implementations of newBufferPool are provided in bufferpool_linux.go and bufferpool_windows.go

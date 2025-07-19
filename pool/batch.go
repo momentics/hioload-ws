@@ -1,20 +1,17 @@
-// Package pool
+// Package pool — zero-alloc batching without locks.
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
-// High-performance zero-allocation batching for Buffers and generic objects.
+// High-performance zero-copy batch of api.Buffer objects.
+// This implementation is NOT thread-safe and avoids mutex in hot-path.
 
 package pool
 
-import (
-	"sync"
-	"github.com/momentics/hioload-ws/api"
-)
+import "github.com/momentics/hioload-ws/api"
 
-// BufferBatch is a lock-free batch of api.Buffer objects.
+// BufferBatch is a minimal zero-alloc batch of api.Buffer.
 type BufferBatch struct {
 	buffers []api.Buffer
-	size    int
-	mu      sync.Mutex
 }
 
 // NewBufferBatch creates a new batch with given capacity.
@@ -23,34 +20,38 @@ func NewBufferBatch(capacity int) *BufferBatch {
 		buffers: make([]api.Buffer, 0, capacity),
 	}
 }
+
+// Append adds a buffer to the batch.
 func (b *BufferBatch) Append(buf api.Buffer) {
-	b.mu.Lock()
 	b.buffers = append(b.buffers, buf)
-	b.size++
-	b.mu.Unlock()
 }
+
+// Len returns number of items in the batch.
 func (b *BufferBatch) Len() int {
-	return b.size
+	return len(b.buffers)
 }
+
+// Get retrieves item at index.
 func (b *BufferBatch) Get(idx int) api.Buffer {
 	return b.buffers[idx]
 }
+
+// Slice returns zero-copy sub-batch [start:end).
 func (b *BufferBatch) Slice(start, end int) *BufferBatch {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	sub := make([]api.Buffer, end-start)
-	copy(sub, b.buffers[start:end])
-	return &BufferBatch{buffers: sub, size: end - start}
+	return &BufferBatch{buffers: b.buffers[start:end]}
 }
+
+// Underlying returns the underlying slice.
 func (b *BufferBatch) Underlying() []api.Buffer {
 	return b.buffers
 }
-func (b *BufferBatch) Split(idx int) (*BufferBatch, *BufferBatch) {
-	return b.Slice(0, idx), b.Slice(idx, b.size)
+
+// Split divides the batch at idx into two sub-batches.
+func (b *BufferBatch) Split(idx int) (first, second *BufferBatch) {
+	return &BufferBatch{buffers: b.buffers[:idx]}, &BufferBatch{buffers: b.buffers[idx:]}
 }
+
+// Reset clears the batch retaining underlying buffer.
 func (b *BufferBatch) Reset() {
-	b.mu.Lock()
 	b.buffers = b.buffers[:0]
-	b.size = 0
-	b.mu.Unlock()
 }

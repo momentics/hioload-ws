@@ -1,101 +1,86 @@
-// +build windows
-
-// Package pool
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
-// Windows-specific NUMA-aware, zero-copy buffer pool implementation.
+// Windows large-page buffer pool using VirtualAlloc.
 
 package pool
 
 import (
 	"sync"
+	"syscall"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+
 	"github.com/momentics/hioload-ws/api"
 )
 
-// windowsBuffer implements api.Buffer for Windows.
+var (
+	kern32           = syscall.NewLazyDLL("kernel32.dll")
+	procVirtualAlloc = kern32.NewProc("VirtualAlloc")
+)
+
 type windowsBuffer struct {
 	data   []byte
 	pool   *windowsBufferPool
-	numaId int
-	used   bool
-	mu     sync.Mutex
+	numaID int
 }
 
-func (b *windowsBuffer) Bytes() []byte { return b.data }
-func (b *windowsBuffer) Slice(start, end int) api.Buffer {
-	if start < 0 || end > len(b.data) || start > end {
-		panic("slice bounds out of range")
-	}
-	return &windowsBuffer{
-		data:   b.data[start:end],
-		pool:   b.pool,
-		numaId: b.numaId,
-		used:   true,
-	}
+// Bytes implements api.Buffer.
+func (w *windowsBuffer) Bytes() []byte {
+	panic("unimplemented")
 }
-func (b *windowsBuffer) Release() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if !b.used { return }
-	b.pool.putBuffer(b)
-	b.used = false
+
+// Copy implements api.Buffer.
+func (w *windowsBuffer) Copy() []byte {
+	panic("unimplemented")
 }
-func (b *windowsBuffer) Copy() []byte {
-	dst := make([]byte, len(b.data))
-	copy(dst, b.data)
-	return dst
+
+// NUMANode implements api.Buffer.
+func (w *windowsBuffer) NUMANode() int {
+	panic("unimplemented")
 }
-func (b *windowsBuffer) NUMANode() int { return b.numaId }
+
+// Release implements api.Buffer.
+func (w *windowsBuffer) Release() {
+	panic("unimplemented")
+}
+
+// Slice implements api.Buffer.
+func (w *windowsBuffer) Slice(from int, to int) api.Buffer {
+	panic("unimplemented")
+}
 
 type windowsBufferPool struct {
-	pool    sync.Pool
-	numaId  int
-	bufSize int
-	stats   api.BufferPoolStats
+	pools map[int]chan *windowsBuffer
+	mu    sync.Mutex
 }
 
-func (bp *windowsBufferPool) getBuffer(size int) *windowsBuffer {
-	b := bp.pool.Get()
-	if b == nil {
-		bb := make([]byte, size)
-		return &windowsBuffer{
-			data:   bb,
-			pool:   bp,
-			numaId: bp.numaId,
-			used:   true,
-		}
+func newBufferPool(numaNode int) api.BufferPool {
+	wp := &windowsBufferPool{pools: make(map[int]chan *windowsBuffer)}
+	wp.pools[numaNode] = make(chan *windowsBuffer, 1024)
+	return wp
+}
+
+func (bp *windowsBufferPool) Get(size, numaPreferred int) api.Buffer {
+	select {
+	case buf := <-bp.pools[numaPreferred]:
+		return buf
+	default:
+		addr, _, _ := procVirtualAlloc.Call(0, uintptr(size),
+			windows.MEM_RESERVE|windows.MEM_COMMIT|windows.MEM_LARGE_PAGES,
+			syscall.PAGE_READWRITE)
+		slice := (*[1 << 30]byte)(unsafe.Pointer(addr))[:size:size]
+		return &windowsBuffer{data: slice, pool: bp, numaID: numaPreferred}
 	}
-	buf := b.(*windowsBuffer)
-	if cap(buf.data) < size {
-		buf.data = make([]byte, size)
-	}
-	buf.data = buf.data[:size]
-	buf.used = true
-	return buf
-}
-
-func (bp *windowsBufferPool) putBuffer(b *windowsBuffer) {
-	bp.pool.Put(b)
-}
-
-func (bp *windowsBufferPool) Get(size int, numaPreferred int) api.Buffer {
-	return bp.getBuffer(size)
 }
 
 func (bp *windowsBufferPool) Put(b api.Buffer) {
 	if wb, ok := b.(*windowsBuffer); ok {
-		bp.putBuffer(wb)
+		bp.pools[wb.numaID] <- wb
 	}
 }
 
 func (bp *windowsBufferPool) Stats() api.BufferPoolStats {
-	return bp.stats
-}
-
-// newBufferPool (Windows) creates buffer pool with potential NUMA affinity.
-func newBufferPool(numaNode int) api.BufferPool {
-	return &windowsBufferPool{
-		numaId:  numaNode,
-		bufSize: 65536,
-	}
+	return api.BufferPoolStats{}
 }

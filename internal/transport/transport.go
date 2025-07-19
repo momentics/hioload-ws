@@ -1,63 +1,68 @@
-// Package transport
+// internal/transport/transport.go
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
-// Platform-independent facade and factory for Transport implementations.
-// Provides a unified interface for sending and receiving zero-copy data buffers
-// across heterogeneous operating systems with NUMA-aware optimizations.
+// Unified Transport factory and thread-safe wrapper.
 
 package transport
 
 import (
-	"sync"
+    "fmt"
+    "sync"
 
-	"github.com/momentics/hioload-ws/api"
+    "github.com/momentics/hioload-ws/api"
 )
 
-// TransportWrapper implements api.Transport interface and wraps platform-specific transport implementation.
+// TransportWrapper wraps an api.Transport with mutex for safe concurrent reconfiguration.
 type TransportWrapper struct {
-	impl api.Transport
-	mu   sync.RWMutex
+    impl api.Transport
+    mu   sync.RWMutex
 }
 
-// NewTransport creates a new Transport instance suitable to the host platform.
+// NewTransport constructs the underlying platform-specific transport.
+// It calls newTransportInternal (implemented in linux/windows) and wraps it.
 func NewTransport() (api.Transport, error) {
-	return newTransportInternal()
+    impl, err := newTransportInternal()
+    if err != nil {
+        return nil, fmt.Errorf("transport init: %w", err)
+    }
+    return &TransportWrapper{impl: impl}, nil
 }
 
-// Send implements api.Transport.Send using platform-specific implementation.
-func (t *TransportWrapper) Send(buffers [][]byte) error {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.impl.Send(buffers)
+// Send forwards to underlying transport.
+func (w *TransportWrapper) Send(buffers [][]byte) error {
+    w.mu.RLock()
+    defer w.mu.RUnlock()
+    return w.impl.Send(buffers)
 }
 
-// Recv implements api.Transport.Recv using platform-specific implementation.
-func (t *TransportWrapper) Recv() ([][]byte, error) {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.impl.Recv()
+// Recv forwards to underlying transport.
+func (w *TransportWrapper) Recv() ([][]byte, error) {
+    w.mu.RLock()
+    defer w.mu.RUnlock()
+    return w.impl.Recv()
 }
 
-// Close implements api.Transport.Close using platform-specific implementation.
-func (t *TransportWrapper) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.impl.Close()
+// Close forwards to underlying transport.
+func (w *TransportWrapper) Close() error {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+    return w.impl.Close()
 }
 
-// Features implements api.Transport.Features using platform-specific implementation.
-func (t *TransportWrapper) Features() api.TransportFeatures {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.impl.Features()
+// Features returns capabilities of underlying transport.
+func (w *TransportWrapper) Features() api.TransportFeatures {
+    w.mu.RLock()
+    defer w.mu.RUnlock()
+    return w.impl.Features()
 }
 
-// SetImplementation allows hot-swapping the underlying transport implementation.
-func (t *TransportWrapper) SetImplementation(newImpl api.Transport) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.impl != nil {
-		_ = t.impl.Close()
-	}
-	t.impl = newImpl
+// SetImplementation replaces the underlying transport (for DPDK fallback).
+func (w *TransportWrapper) SetImplementation(newImpl api.Transport) {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+    if w.impl != nil {
+        _ = w.impl.Close()
+    }
+    w.impl = newImpl
 }

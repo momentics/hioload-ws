@@ -1,0 +1,19 @@
+hioload-ws - High-performance, NUMA-aware WebSocket library for Go
+Copyright 2023-2025 momentics <momentics@gmail.com>
+
+This product includes software developed by momentics and the hioload-ws contributors.
+Portions of this software are derived from, or inspired by, open source projects as listed below.
+
+Third-party open source components used:
+
+- github.com/eapache/queue - Permissive MIT License
+  https://github.com/eapache/queue
+- golang.org/x/sys - Permissive BSD-like License (Go Authors)
+  https://pkg.go.dev/golang.org/x/sys
+
+No modifications were made to the original source code of these dependencies except for integration and bugfixes where required.
+
+The hioload-ws project itself is licensed under the Apache License, Version 2.0.  
+See LICENSE for terms and patent grant.
+
+If any dependency used herein includes its own NOTICE file, the details of that NOTICE are included verbatim below according to the terms of the Apache 2.0 license.

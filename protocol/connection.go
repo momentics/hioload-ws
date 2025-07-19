@@ -8,9 +8,10 @@ package protocol
 
 import (
 	"errors"
-	"github.com/momentics/hioload-ws/api"
 	"io"
 	"sync"
+
+	"github.com/momentics/hioload-ws/api"
 )
 
 // WSConnection represents a full connection state machine.
@@ -21,6 +22,10 @@ type WSConnection struct {
 	bufPool   api.BufferPool
 	closed    bool
 	mu        sync.Mutex
+}
+
+func (c *WSConnection) Recv() (any, any) {
+	panic("unimplemented")
 }
 
 // NewWSConnection constructs a new connection from transport and buffers.

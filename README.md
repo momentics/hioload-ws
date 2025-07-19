@@ -316,7 +316,7 @@ hioload-ws is designed as a deeply commented and flexible reference point—not 
 
 ## License & Contribution
 
-hioload-ws is available under the MIT License: see `LICENSE` in the repository root for full text.
+hioload-ws is available under the Apache 2.0 License: see `LICENSE` in the repository root for full text.
 
 **Contributions are welcome!**  
 Open issues, feature proposals, and pull requests to drive the project forward are invited. All architectural discussion, code review suggestions, and production bugfixes are encouraged—especially those accelerating state-of-the-art or enabling new deployment paradigms.
