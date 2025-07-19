@@ -8,6 +8,7 @@ package facade
 
 import (
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/momentics/hioload-ws/adapters"
@@ -51,7 +52,7 @@ type Config struct {
 	EnableDebug   bool
 }
 
-// DefaultConfig returns reasonable defaults.
+// DefaultConfig returns default config.
 func DefaultConfig() *Config {
 	return &Config{
 		NumWorkers:    4,
@@ -69,28 +70,41 @@ func DefaultConfig() *Config {
 }
 
 // New constructs a HioloadWS instance.
+// DPDK is optional. If not available or init fails, falls back to standard transport.
 func New(config *Config) (*HioloadWS, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}
-    h := &HioloadWS{config: config}
-    if config.UseDPDK {
-        if err := initDPDK(config.DPDKMode); err != nil {
-            // fallback to native transport
-            log.Printf("[facade] DPDK init failed: %v, using native I/O", err)
-        } else {
-            h.transport = newDPDKTransport()
-        }
-    }
+	h := &HioloadWS{config: config}
+
+	// Core manager and control setup.
 	h.control = adapters.NewControlAdapter()
 	h.affinity = adapters.NewAffinityAdapter()
 	h.poolManager = pool.NewBufferPoolManager()
 	h.bufferPool = h.poolManager.GetPool(config.NUMANode)
-	transportImpl, err := transport.NewTransport()
-	if err != nil {
-		return nil, fmt.Errorf("create transport: %w", err)
+
+	var transportImpl api.Transport
+	var err error
+
+	// DPDK integration block
+	if config.UseDPDK {
+		// The dpdk submodule only gets compiled if tagged in build (see dpdk_transport.go).
+		transportImpl, err = transport.NewDPDKTransport(config.DPDKMode)
+		if err != nil {
+			log.Printf("[facade] DPDK unavailable or init failed: %v, fallback to native transport", err)
+			transportImpl, err = transport.NewTransport()
+			if err != nil {
+				return nil, fmt.Errorf("native transport init failed: %w", err)
+			}
+		}
+	} else {
+		transportImpl, err = transport.NewTransport()
+		if err != nil {
+			return nil, fmt.Errorf("native transport init failed: %w", err)
+		}
 	}
 	h.transport = transportImpl
+
 	h.sessionMgr = session.NewSessionManager(config.SessionShards)
 	h.executor = concurrency.NewExecutor(config.NumWorkers, config.NUMANode)
 	h.poller = adapters.NewPollerAdapter(config.BatchSize, config.RingCapacity)
@@ -103,6 +117,7 @@ func New(config *Config) (*HioloadWS, error) {
 		"transport_type": config.TransportType,
 		"listen_addr":    config.ListenAddr,
 	})
+
 	return h, nil
 }
 
@@ -156,12 +171,10 @@ func (h *HioloadWS) Submit(task func()) error {
 	return h.executor.Submit(task)
 }
 
-// GetBufferPool returns the underlying buffer pool instance.
 func (h *HioloadWS) GetBufferPool() api.BufferPool {
 	return h.bufferPool
 }
 
-// GetBuffer allocates a buffer of given size from the pool.
 func (h *HioloadWS) GetBuffer(size int) api.Buffer {
 	return h.bufferPool.Get(size, h.config.NUMANode)
 }
