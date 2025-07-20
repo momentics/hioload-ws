@@ -1,8 +1,5 @@
-// File: pool/bufferpool_linux.go
-// Author: momentics <momentics@gmail.com>
-//
-// Linux NUMA-aware buffer pool using mmap with huge pages.
-// All logic is safe to fallback if huge pages or NUMA are not present.
+//go:build linux
+// +build linux
 
 package pool
 
@@ -19,49 +16,31 @@ type linuxBuffer struct {
 	numaID int
 }
 
-func (l *linuxBuffer) Bytes() []byte {
-	return l.data
-}
-func (l *linuxBuffer) Copy() []byte {
-	dst := make([]byte, len(l.data))
-	copy(dst, l.data)
-	return dst
-}
-func (l *linuxBuffer) NUMANode() int {
-	return l.numaID
-}
-func (l *linuxBuffer) Release() {
-	l.pool.recycle(l)
-}
-func (l *linuxBuffer) Slice(from, to int) api.Buffer {
-	if from < 0 || to > len(l.data) || from > to {
-		return nil
-	}
-	nb := *l
-	nb.data = nb.data[from:to]
-	return &nb
+func (b *linuxBuffer) Bytes() []byte { return b.data }
+func (b *linuxBuffer) Release()      { b.pool.recycle(b) }
+func (b *linuxBuffer) Copy() []byte  { c := make([]byte, len(b.data)); copy(c, b.data); return c }
+func (b *linuxBuffer) NUMANode() int { return b.numaID }
+func (b *linuxBuffer) Slice(from, to int) api.Buffer {
+	return &linuxBuffer{data: b.data[from:to], pool: b.pool, numaID: b.numaID}
 }
 
 type linuxBufferPool struct {
-	pools map[int]chan *linuxBuffer // NUMA node -> buffer channel
+	pools map[int]chan *linuxBuffer
 	mu    sync.Mutex
 }
 
 func newBufferPool(numaNode int) api.BufferPool {
-	bp := &linuxBufferPool{pools: make(map[int]chan *linuxBuffer)}
-	bp.pools[numaNode] = make(chan *linuxBuffer, 1024)
-	return bp
+	return &linuxBufferPool{pools: map[int]chan *linuxBuffer{numaNode: make(chan *linuxBuffer, 1024)}}
 }
 
-// Get always returns a buffer sized >= size, possibly new or recycled.
-func (bp *linuxBufferPool) Get(size, numaPreferred int) api.Buffer {
-	bp.mu.Lock()
-	ch, ok := bp.pools[numaPreferred]
+func (p *linuxBufferPool) Get(size, numaPref int) api.Buffer {
+	p.mu.Lock()
+	ch, ok := p.pools[numaPref]
 	if !ok {
 		ch = make(chan *linuxBuffer, 1024)
-		bp.pools[numaPreferred] = ch
+		p.pools[numaPref] = ch
 	}
-	bp.mu.Unlock()
+	p.mu.Unlock()
 	select {
 	case buf := <-ch:
 		if cap(buf.data) < size {
@@ -71,35 +50,24 @@ func (bp *linuxBufferPool) Get(size, numaPreferred int) api.Buffer {
 		}
 		return buf
 	default:
-		const HUGEPAGE = 2 << 20
-		length := ((size + HUGEPAGE - 1) / HUGEPAGE) * HUGEPAGE
-		// try hugepage mmap; fallback allocation if needed
-		data, err := syscall.Mmap(-1, 0, length, syscall.PROT_READ|syscall.PROT_WRITE,
-			syscall.MAP_PRIVATE|syscall.MAP_ANONYMOUS|syscall.MAP_HUGETLB)
+		length := ((size + (2 << 20) - 1) / (2 << 20)) * (2 << 20)
+		data, err := syscall.Mmap(-1, 0, length, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_ANONYMOUS|syscall.MAP_PRIVATE|syscall.MAP_HUGETLB)
 		if err != nil {
-			data = make([]byte, size)
-			return &linuxBuffer{data: data, pool: bp, numaID: numaPreferred}
+			return &linuxBuffer{data: make([]byte, size), pool: p, numaID: numaPref}
 		}
-		return &linuxBuffer{data: data[:size], pool: bp, numaID: numaPreferred}
+		return &linuxBuffer{data: data[:size], pool: p, numaID: numaPref}
 	}
 }
 
-// Put returns buffer to pool (non-blocking).
-func (bp *linuxBufferPool) Put(b api.Buffer) {
+func (p *linuxBufferPool) Put(b api.Buffer) {
 	if lb, ok := b.(*linuxBuffer); ok {
 		select {
-		case bp.pools[lb.numaID] <- lb:
+		case p.pools[lb.numaID] <- lb:
 		default:
-			// drop buffer if pool full
 		}
 	}
 }
 
-// Stats returns stats if required. Left empty for prototype.
-func (bp *linuxBufferPool) Stats() api.BufferPoolStats {
-	return api.BufferPoolStats{}
-}
+func (p *linuxBufferPool) Stats() api.BufferPoolStats { return api.BufferPoolStats{} }
 
-func (bp *linuxBufferPool) recycle(b *linuxBuffer) {
-	bp.Put(b)
-}
+func (p *linuxBufferPool) recycle(b *linuxBuffer) { p.Put(b) }

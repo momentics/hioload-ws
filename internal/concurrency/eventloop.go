@@ -1,9 +1,10 @@
 // File: internal/concurrency/eventloop.go
-// Package concurrency
+// Package concurrency implements a high-performance event loop with adaptive backoff.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// High-performance event loop with adaptive backoff and lock-free operation.
+// EventLoop processes events in batches without locks on the hot path.
+// Handlers are decoupled via atomic.Value, supporting dynamic registration.
 
 package concurrency
 
@@ -12,211 +13,163 @@ import (
 	"sync/atomic"
 	"time"
 )
-// Event represents a generic event in the loop.
+
+// Event represents a generic event with arbitrary payload.
 type Event struct {
-	Type string
 	Data interface{}
 }
 
-// EventHandler processes events.
+// EventHandler processes individual events.
 type EventHandler interface {
-	HandleEvent(event Event)
+	HandleEvent(ev Event)
 }
 
-// EventLoop provides a high-performance, poll-mode event processing loop.
+// EventLoop is a batched poll-mode loop with exponential backoff.
 type EventLoop struct {
-	eventQueue *RingBuffer[Event]
-	handlers   atomic.Value // []EventHandler
-	batchSize  int
-	running    int32
-	stopped    int32
-	stopCh     chan struct{}
-	backoffNs  int64
+	queue     *RingBuffer[Event]
+	handlers  atomic.Value // []EventHandler
+	batchSize int
+	stopCh    chan struct{}
+	running   int32
+	stopped   int32
+	backoffNs int64
 }
 
-// NewEventLoop creates a new event loop.
+// NewEventLoop creates a new EventLoop.
+// batchSize: max events per cycle.
+// queueSize: ring buffer capacity; will be rounded up to next power of two.
 func NewEventLoop(batchSize, queueSize int) *EventLoop {
 	if batchSize <= 0 {
 		batchSize = 16
 	}
-	if queueSize <= 0 || (queueSize&(queueSize-1)) != 0 {
-		queueSize = 1024
-	}
+	// Round queueSize up to next power of two
+	size := nextPowerOfTwo(uint32(queueSize))
 	loop := &EventLoop{
-		eventQueue: NewRingBuffer[Event](uint64(queueSize)),
-		batchSize:  batchSize,
-		stopCh:     make(chan struct{}),
-		backoffNs:  1,
+		queue:     NewRingBuffer[Event](uint64(size)),
+		batchSize: batchSize,
+		stopCh:    make(chan struct{}),
+		backoffNs: 1,
 	}
 	loop.handlers.Store([]EventHandler{})
 	return loop
 }
 
-// Close gracefully shuts down the executor and all workers.
-func (e *Executor) Close() {
-	e.CloseWithTimeout(0)
+// nextPowerOfTwo returns the smallest power of two >= v.
+func nextPowerOfTwo(v uint32) uint32 {
+	if v == 0 {
+		return 1
+	}
+	v--
+	v |= v >> 1
+	v |= v >> 2
+	v |= v >> 4
+	v |= v >> 8
+	v |= v >> 16
+	v++
+	return v
 }
 
-// CloseWithTimeout gracefully shuts down the executor and all workers.
-// It waits up to the given timeout for workers to exit. Zero timeout waits indefinitely.
-func (e *Executor) CloseWithTimeout(timeout time.Duration) {
-	e.closeOnce.Do(func() {
-		atomic.StoreInt32(&e.closed, 1)
-		close(e.closeCh)
-		// stop all workers
-		e.resizeMu.Lock()
-		for _, w := range e.workers {
-			close(w.stopCh)
-		}
-		e.resizeMu.Unlock()
-		// wait for workers to exit
-		done := make(chan struct{})
-		go func() {
-			var wg sync.WaitGroup
-			for _, w := range e.workers {
-				wg.Add(1)
-				go func(worker *worker) {
-					defer wg.Done()
-					for atomic.LoadInt32(&worker.stopped) == 0 {
-						time.Sleep(time.Millisecond)
-					}
-				}(w)
-			}
-			wg.Wait()
-			close(done)
-		}()
-
-		if timeout <= 0 {
-			<-done
-		} else {
-			select {
-			case <-done:
-			case <-time.After(timeout):
-			}
-		}
-	})
-}
-// RegisterHandler adds an event handler.
-func (el *EventLoop) RegisterHandler(handler EventHandler) {
+func (el *EventLoop) RegisterHandler(h EventHandler) {
 	for {
 		old := el.handlers.Load().([]EventHandler)
-		new := make([]EventHandler, len(old)+1)
-		copy(new, old)
-		new[len(old)] = handler
+		new := append(old, h)
 		if el.handlers.CompareAndSwap(old, new) {
-			break
+			return
 		}
 	}
 }
 
-// UnregisterHandler removes an event handler.
-func (el *EventLoop) UnregisterHandler(handler EventHandler) {
+func (el *EventLoop) UnregisterHandler(h EventHandler) {
 	for {
 		old := el.handlers.Load().([]EventHandler)
-		new := make([]EventHandler, 0, len(old))
-		for _, h := range old {
-			if h != handler {
-				new = append(new, h)
+		var new []EventHandler
+		for _, hh := range old {
+			if hh != h {
+				new = append(new, hh)
 			}
 		}
 		if el.handlers.CompareAndSwap(old, new) {
-			break
+			return
 		}
 	}
 }
 
-// PostEvent adds an event to the queue.
-func (el *EventLoop) PostEvent(event Event) bool {
-	return el.eventQueue.Enqueue(event)
+func (el *EventLoop) Post(ev Event) bool {
+	return el.queue.Enqueue(ev)
 }
 
-// Run starts the event loop.
 func (el *EventLoop) Run() {
 	if !atomic.CompareAndSwapInt32(&el.running, 0, 1) {
-		return // Already running
+		return
 	}
 	defer atomic.StoreInt32(&el.stopped, 1)
-
 	batch := make([]Event, el.batchSize)
-
 	for {
 		select {
 		case <-el.stopCh:
 			return
 		default:
 			processed := el.processBatch(batch)
-			if processed > 0 {
-				atomic.StoreInt64(&el.backoffNs, 1)
-			} else {
+			if processed == 0 {
 				el.adaptiveBackoff()
+			} else {
+				atomic.StoreInt64(&el.backoffNs, 1)
 			}
 		}
 	}
 }
 
-// processBatch processes up to batchSize events.
 func (el *EventLoop) processBatch(batch []Event) int {
-	processed := 0
+	count := 0
 	handlers := el.handlers.Load().([]EventHandler)
-
 	for i := 0; i < el.batchSize; i++ {
-		if event, ok := el.eventQueue.Dequeue(); ok {
-			batch[i] = event
-			processed++
-		} else {
+		ev, ok := el.queue.Dequeue()
+		if !ok {
 			break
 		}
+		batch[i] = ev
+		count++
 	}
-
-	for i := 0; i < processed; i++ {
-		for _, handler := range handlers {
-			handler.HandleEvent(batch[i])
+	for i := 0; i < count; i++ {
+		for _, h := range handlers {
+			h.HandleEvent(batch[i])
 		}
 	}
-	return processed
+	return count
 }
 
-// adaptiveBackoff implements exponential backoff with cap and stop check.
 func (el *EventLoop) adaptiveBackoff() {
-	// check for stop
 	select {
 	case <-el.stopCh:
 		return
 	default:
 	}
-
 	backoff := atomic.LoadInt64(&el.backoffNs)
 	if backoff < 1000 {
-		// busy-wait short duration
 		time.Sleep(time.Microsecond)
 	} else {
-		// yield scheduler for longer waits
 		runtime.Gosched()
 	}
-
-	newBackoff := backoff * 2
-	if newBackoff > 1_000_000 {
-		newBackoff = 1_000_000
+	next := backoff * 2
+	if next > 1_000_000 {
+		next = 1_000_000
 	}
-	atomic.StoreInt64(&el.backoffNs, newBackoff)
+	atomic.StoreInt64(&el.backoffNs, next)
 }
 
-// Stop gracefully stops the event loop.
 func (el *EventLoop) Stop() {
 	if atomic.LoadInt32(&el.running) == 1 {
 		close(el.stopCh)
 		for atomic.LoadInt32(&el.stopped) == 0 {
-			time.Sleep(time.Microsecond * 100)
+			time.Sleep(time.Microsecond)
 		}
 	}
 }
 
-// Pending returns the number of pending events.
 func (el *EventLoop) Pending() int {
-	return el.eventQueue.Len()
+	return el.queue.Len()
 }
 
-// IsRunning returns true if the event loop is running.
 func (el *EventLoop) IsRunning() bool {
 	return atomic.LoadInt32(&el.running) == 1
 }

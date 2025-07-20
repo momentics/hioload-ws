@@ -1,9 +1,7 @@
 // File: facade/hioload.go
-// Package facade
+// Unified facade layer for hioload-ws library.
 // Author: momentics <momentics@gmail.com>
-//
-// Unified facade layer providing a single entry point for hioload-ws library.
-// All critical reactor, transport and pooling logic is exposed here.
+// License: Apache-2.0
 
 package facade
 
@@ -21,118 +19,115 @@ import (
 	"github.com/momentics/hioload-ws/protocol"
 )
 
-// HioloadWS is the main facade type.
-type HioloadWS struct {
-	transport   api.Transport
-	bufferPool  api.BufferPool
-	poller      api.Poller
-	affinity    api.Affinity
-	control     api.Control
-	executor    *concurrency.Executor
-	sessionMgr  session.SessionManager
-	poolManager *pool.BufferPoolManager
-	config      *Config
-	started     bool
-	mu          sync.RWMutex
-}
-
-// Config holds initialization parameters.
+// Config holds parameters immutable per run.
 type Config struct {
+	IOBufferSize  int
+	ChannelSize   int
+	RingCapacity  int
+	BatchSize     int
 	UseDPDK       bool
-	DPDKMode      string
-	NumWorkers    int
-	NUMANode      int
-	CPUAffinity   bool
-	IOBufferSize  int // moved from hardcoded 65536
-	ChannelSize   int // new: capacity for inbox/outbox channels
-	RingCapacity  int // moved from hardcoded 1024
-	BatchSize     int // moved from hardcoded 16
 	TransportType string
 	ListenAddr    string
+	NumWorkers    int
+	NUMANode      int
 	SessionShards int
 	EnableMetrics bool
 	EnableDebug   bool
 }
 
-// DefaultConfig returns default config.
-// All magic numbers centralized here.
+// DefaultConfig returns default configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		NumWorkers:    4,
-		NUMANode:      -1,
-		CPUAffinity:   true,
-		IOBufferSize:  64 * 1024,   // default IO buffer size (65536)
-		ChannelSize:   64,          // default WSConnection inbox/outbox capacity
-		RingCapacity:  1024,        // default event loop ring buffer capacity
-		BatchSize:     16,          // default event loop batch size
+		IOBufferSize:  64 * 1024,
+		ChannelSize:   64,
+		RingCapacity:  1024,
+		BatchSize:     16,
+		UseDPDK:       false,
 		TransportType: "tcp",
 		ListenAddr:    ":8080",
+		NumWorkers:    4,
+		NUMANode:      -1,
 		SessionShards: 16,
 		EnableMetrics: true,
 		EnableDebug:   true,
 	}
 }
 
-// New constructs a HioloadWS instance.
-// DPDK is optional. If not available or init fails, falls back to standard transport.
-func New(config *Config) (*HioloadWS, error) {
-	if config == nil {
-		config = DefaultConfig()
-	}
-	h := &HioloadWS{config: config}
+// HioloadWS is the main facade type.
+type HioloadWS struct {
+	transport  api.Transport
+	bufferPool api.BufferPool
+	poller     api.Poller
+	affinity   api.Affinity
+	control    api.Control
+	executor   *concurrency.Executor
+	sessionMgr session.SessionManager
 
-	// Core manager and control setup.
+	config  *Config
+	mu      sync.RWMutex
+	started bool
+}
+
+// New constructs HioloadWS with immutable parameters.
+func New(cfg *Config) (*HioloadWS, error) {
+	if cfg == nil {
+		cfg = DefaultConfig()
+	}
+	h := &HioloadWS{config: cfg}
+
+	// Control & Affinity adapters
 	h.control = adapters.NewControlAdapter()
 	h.affinity = adapters.NewAffinityAdapter()
-	h.poolManager = pool.NewBufferPoolManager()
-	h.bufferPool = h.poolManager.GetPool(config.NUMANode)
 
-	var transportImpl api.Transport
+	// Buffer pool
+	poolMgr := pool.NewBufferPoolManager()
+	h.bufferPool = poolMgr.GetPool(cfg.NUMANode)
+
+	// Transport
+	var tr api.Transport
 	var err error
-
-	// DPDK integration block
-	if config.UseDPDK {
-		transportImpl, err = transport.NewDPDKTransport(config.DPDKMode)
+	if cfg.UseDPDK {
+		tr, err = transport.NewDPDKTransport(cfg.IOBufferSize)
 		if err != nil {
-			log.Printf("[facade] DPDK unavailable or init failed: %v, fallback to native transport", err)
-			transportImpl, err = transport.NewTransport()
-			if err != nil {
-				return nil, fmt.Errorf("native transport init failed: %w", err)
-			}
+			log.Printf("[facade] DPDK init failed: %v, fallback", err)
+			tr, err = transport.NewTransport(cfg.IOBufferSize)
 		}
 	} else {
-		transportImpl, err = transport.NewTransport()
-		if err != nil {
-			return nil, fmt.Errorf("native transport init failed: %w", err)
-		}
+		tr, err = transport.NewTransport(cfg.IOBufferSize)
 	}
-	h.transport = transportImpl
+	if err != nil {
+		return nil, fmt.Errorf("transport init: %w", err)
+	}
+	h.transport = tr
 
-	h.sessionMgr = session.NewSessionManager(config.SessionShards)
-	h.executor = concurrency.NewExecutor(config.NumWorkers, config.NUMANode)
-	h.poller = adapters.NewPollerAdapter(config.BatchSize, config.RingCapacity)
+	// Session manager
+	h.sessionMgr = session.NewSessionManager(cfg.SessionShards)
+
+	// Executor
+	h.executor = concurrency.NewExecutor(cfg.NumWorkers, cfg.NUMANode)
+
+	// Poller
+	h.poller = adapters.NewPollerAdapter(cfg.BatchSize, cfg.RingCapacity)
+
+	// Dynamic config
 	h.control.SetConfig(map[string]any{
-		"numa_node":      config.NUMANode,
-		"num_workers":    config.NumWorkers,
-		"buffer_size":    config.BufferSize,
-		"ring_capacity":  config.RingCapacity,
-		"batch_size":     config.BatchSize,
-		"transport_type": config.TransportType,
-		"listen_addr":    config.ListenAddr,
+		"transport_type": cfg.TransportType,
+		"listen_addr":    cfg.ListenAddr,
 	})
 
 	return h, nil
 }
 
+// Start pins threads and enables metrics.
 func (h *HioloadWS) Start() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.started {
-		return fmt.Errorf("already started")
+		return nil
 	}
-	if h.config.CPUAffinity {
-		if err := h.affinity.Pin(-1, h.config.NUMANode); err != nil {
-			return fmt.Errorf("pin affinity: %w", err)
+	if h.config.NUMANode >= 0 {
+		if err := h.affinity.Pin(h.config.NUMANode, -1); err != nil {
+			return err
 		}
 	}
 	if h.config.EnableMetrics {
@@ -142,67 +137,32 @@ func (h *HioloadWS) Start() error {
 	return nil
 }
 
+// Stop cleans up resources.
 func (h *HioloadWS) Stop() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.started {
 		return nil
 	}
-	if pa, ok := h.poller.(*adapters.PollerAdapter); ok {
-		pa.Stop()
-	}
-	if err := h.transport.Close(); err != nil {
-		return fmt.Errorf("close transport: %w", err)
-	}
+	h.poller.Stop()
+	h.transport.Close()
 	h.executor.Close()
-	if h.config.CPUAffinity {
-		_ = h.affinity.Unpin()
-	}
+	h.affinity.Unpin()
 	h.started = false
 	return nil
 }
 
-func (h *HioloadWS) CreateWebSocketConnection() *protocol.WSConnection {
-	return protocol.NewWSConnection(h.transport, h.bufferPool)
-}
-
-func (h *HioloadWS) RegisterHandler(handler api.Handler) error {
-	return h.poller.Register(handler)
-}
-
-func (h *HioloadWS) Submit(task func()) error {
-	return h.executor.Submit(task)
-}
-
-func (h *HioloadWS) GetBufferPool() api.BufferPool {
-	return h.bufferPool
-}
-
-func (h *HioloadWS) GetBuffer(size int) api.Buffer {
-	return h.bufferPool.Get(size, h.config.NUMANode)
-}
-
-func (h *HioloadWS) GetTransport() api.Transport {
-	return h.transport
-}
-
+// GetControl returns the Control interface for dynamic config and debug probes.
 func (h *HioloadWS) GetControl() api.Control {
 	return h.control
 }
 
-func (h *HioloadWS) GetPoller() api.Poller {
-	return h.poller
+// RegisterHandler registers a Handler with the internal Poller.
+func (h *HioloadWS) RegisterHandler(handler api.Handler) error {
+	return h.poller.Register(handler)
 }
 
-func (h *HioloadWS) GetAffinity() api.Affinity {
-	return h.affinity
-}
-
-func (h *HioloadWS) Poll(maxEvents int) (int, error) {
-	return h.poller.Poll(maxEvents)
-}
-
-// GetSessionCount returns the number of active sessions.
+// GetSessionCount returns the total number of active sessions.
 func (h *HioloadWS) GetSessionCount() int {
 	count := 0
 	h.sessionMgr.Range(func(s session.Session) {
@@ -211,15 +171,7 @@ func (h *HioloadWS) GetSessionCount() int {
 	return count
 }
 
-func (h *HioloadWS) GetStats() map[string]any {
-	stats := h.control.Stats()
-	bs := h.bufferPool.Stats()
-	stats["buffer_pool.total_alloc"] = bs.TotalAlloc
-	stats["buffer_pool.in_use"] = bs.InUse
-	stats["buffer_pool.numa_stats"] = bs.NUMAStats
-	tf := h.transport.Features()
-	stats["transport.zero_copy"] = tf.ZeroCopy
-	stats["executor.num_workers"] = h.executor.NumWorkers()
-	stats["active_sessions"] = h.GetSessionCount()
-	return stats
+// CreateWebSocketConnection constructs a new WSConnection.
+func (h *HioloadWS) CreateWebSocketConnection() *protocol.WSConnection {
+	return protocol.NewWSConnection(h.transport, h.bufferPool, h.config.ChannelSize)
 }

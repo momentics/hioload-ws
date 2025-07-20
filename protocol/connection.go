@@ -1,10 +1,9 @@
 // File: protocol/connection.go
-// Package protocol
+// Package protocol implements WebSocket connection handling.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// WebSocket connection logic.
-// Uses Config.ChannelSize instead of hardcoded 64 for channel capacities.
+// Added missing SetHandler and Done methods; PayloadLen unified to int64.
 
 package protocol
 
@@ -13,15 +12,14 @@ import (
 	"sync"
 
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/facade"
 )
 
-// WSConnection represents a managed WebSocket connection.
+// WSConnection manages framing, zero-copy buffers, and optional handler.
 type WSConnection struct {
 	transport api.Transport
+	bufPool   api.BufferPool
 	inbox     chan *WSFrame
 	outbox    chan *WSFrame
-	bufPool   api.BufferPool
 
 	mu      sync.RWMutex
 	handler api.Handler
@@ -29,31 +27,36 @@ type WSConnection struct {
 	done    chan struct{}
 }
 
-// NewWSConnection creates a new WSConnection.
-// Replaces channel size literal 64 with Config.ChannelSize.
-func NewWSConnection(t api.Transport, pool api.BufferPool) *WSConnection {
-	cs := facade.DefaultConfig().ChannelSize
+// NewWSConnection constructs WSConnection with given channel capacity.
+func NewWSConnection(tr api.Transport, pool api.BufferPool, channelSize int) *WSConnection {
 	return &WSConnection{
-		transport: t,
-		inbox:     make(chan *WSFrame, cs), // use ChannelSize
-		outbox:    make(chan *WSFrame, cs), // use ChannelSize
+		transport: tr,
 		bufPool:   pool,
+		inbox:     make(chan *WSFrame, channelSize),
+		outbox:    make(chan *WSFrame, channelSize),
 		done:      make(chan struct{}),
 	}
 }
 
-// Start launches internal receive and send loops.
+// Start launches I/O loops.
 func (c *WSConnection) Start() {
 	go c.recvLoop()
 	go c.sendLoop()
 }
 
-// Done returns a channel closed when the connection is fully closed.
+// Done returns channel closed upon connection termination.
 func (c *WSConnection) Done() <-chan struct{} {
 	return c.done
 }
 
-// Recv reads the next batch of buffers from the WebSocket.
+// SetHandler registers a Handler to process incoming payloads.
+func (c *WSConnection) SetHandler(h api.Handler) {
+	c.mu.Lock()
+	c.handler = h
+	c.mu.Unlock()
+}
+
+// Recv returns next buffers or error if closed.
 func (c *WSConnection) Recv() ([]api.Buffer, error) {
 	frame, ok := <-c.inbox
 	if !ok {
@@ -64,7 +67,7 @@ func (c *WSConnection) Recv() ([]api.Buffer, error) {
 	return []api.Buffer{buf}, nil
 }
 
-// Send enqueues a frame for transmission.
+// Send enqueues frame for outbound.
 func (c *WSConnection) Send(f *WSFrame) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -79,7 +82,7 @@ func (c *WSConnection) Send(f *WSFrame) error {
 	}
 }
 
-// Close gracefully terminates the connection.
+// Close gracefully shuts down loops and signals Done.
 func (c *WSConnection) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -87,67 +90,47 @@ func (c *WSConnection) Close() error {
 		return nil
 	}
 	c.closed = true
-	// close outgoing channel to stop sendLoop
 	close(c.outbox)
-	// close transport
 	_ = c.transport.Close()
-	// close inbox to stop messageLoop
 	close(c.inbox)
-	// signal done
 	close(c.done)
 	return nil
 }
 
-// recvLoop reads raw data from transport, decodes frames, and sends to inbox.
+// recvLoop reads from transport, decodes frames, and dispatches.
 func (c *WSConnection) recvLoop() {
 	defer c.Close()
 	for {
 		raws, err := c.transport.Recv()
 		if err != nil {
-			if err == api.ErrTransportClosed {
-				// transport closed, exit loop
-				return
-			}
-			// other errors, exit
 			return
 		}
 		for _, raw := range raws {
-			frame, err := DecodeFrame(bytes.NewReader(raw))
+			frame, err := DecodeFrameFromBytes(raw)
 			if err != nil {
 				continue
 			}
 			select {
 			case c.inbox <- frame:
 			default:
-				// drop if inbox full
+			}
+			c.mu.RLock()
+			h := c.handler
+			c.mu.RUnlock()
+			if h != nil {
+				buf := c.bufPool.Get(int(frame.PayloadLen), 0)
+				copy(buf.Bytes(), frame.Payload)
+				h.Handle(buf)
+				buf.Release()
 			}
 		}
 	}
 }
 
-// sendLoop reads frames from outbox and sends via transport.
+// sendLoop reads frames, encodes, and sends via transport.
 func (c *WSConnection) sendLoop() {
-	for {
-		f, ok := <-c.outbox
-		if !ok {
-			// outbox closed, exit sendLoop
-			return
-		}
-		buf := encodeFrameBuffer(f)
-		_ = c.transport.Send([][]byte{buf})
+	for frame := range c.outbox {
+		data := EncodeFrameToBytes(frame)
+		_ = c.transport.Send([][]byte{data})
 	}
-}
-
-// encodeFrameBuffer encodes a WSFrame into a byte slice.
-func encodeFrameBuffer(f *WSFrame) []byte {
-	dst := make([]byte, f.PayloadLen+14)
-	n, _ := EncodeFrame(dst, f.Opcode, f.Payload, false)
-	return dst[:n]
-}
-
-// SetHandler attaches a Handler to process incoming messages.
-func (c *WSConnection) SetHandler(h api.Handler) {
-	c.mu.Lock()
-	c.handler = h
-	c.mu.Unlock()
 }

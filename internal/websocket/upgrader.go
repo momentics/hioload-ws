@@ -1,62 +1,60 @@
-// internal/websocket/upgrader.go
+// File: internal/websocket/upgrader.go
+// Package websocket implements HTTP→WebSocket upgrade and connection creation.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// WebSocket HTTP upgrade handler integrated with hioload-ws transport and buffer pooling.
+// Upgrader encapsulates the WebSocket handshake and constructs a new WSConnection.
+// It delegates the handshake header logic to protocol.UpgradeToWebSocket.
 
 package websocket
 
 import (
-	"crypto/sha1"
-	"encoding/base64"
-	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/momentics/hioload-ws/api"
 	"github.com/momentics/hioload-ws/protocol"
 )
 
-// Upgrader bridges HTTP and WSConnection creation.
+// Upgrader handles the HTTP to WebSocket upgrade process and returns a started WSConnection.
 type Upgrader struct {
-	transport  api.Transport
-	bufferPool api.BufferPool
+	transport   api.Transport  // underlying transport abstraction
+	bufPool     api.BufferPool // zero-copy buffer pool
+	channelSize int            // channel capacity for WSConnection inbox/outbox
 }
 
-func NewUpgrader(transport api.Transport, bufferPool api.BufferPool) *Upgrader {
-	return &Upgrader{transport: transport, bufferPool: bufferPool}
+// NewUpgrader constructs an Upgrader with explicit dependencies.
+// transport: platform-specific Transport implementation
+// bufPool: BufferPool for frame payloads
+// channelSize: capacity for WSConnection channels
+func NewUpgrader(
+	transport api.Transport,
+	bufPool api.BufferPool,
+	channelSize int,
+) *Upgrader {
+	return &Upgrader{
+		transport:   transport,
+		bufPool:     bufPool,
+		channelSize: channelSize,
+	}
 }
 
+// Upgrade performs the WebSocket handshake by delegating to protocol.UpgradeToWebSocket,
+// writes the response headers, and returns a started WSConnection.
 func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request) (*protocol.WSConnection, error) {
-	if !strings.EqualFold(r.Header.Get("Connection"), "Upgrade") ||
-		!strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-		return nil, errors.New("invalid upgrade headers")
+	// Delegate handshake logic to protocol layer
+	headers, err := protocol.UpgradeToWebSocket(r)
+	if err != nil {
+		return nil, err
 	}
-	key := r.Header.Get("Sec-WebSocket-Key")
-	if key == "" {
-		return nil, errors.New("missing Sec-WebSocket-Key")
-	}
-	const guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-	h := sha1.New()
-	h.Write([]byte(key + guid))
-	accept := base64.StdEncoding.EncodeToString(h.Sum(nil))
-	w.Header().Set("Upgrade", "websocket")
-	w.Header().Set("Connection", "Upgrade")
-	w.Header().Set("Sec-WebSocket-Accept", accept)
-	w.WriteHeader(http.StatusSwitchingProtocols)
-	conn := protocol.NewWSConnection(u.transport, u.bufferPool)
-	return conn, nil
-}
 
-func (u *Upgrader) CheckOrigin(r *http.Request, allowed []string) bool {
-	origin := r.Header.Get("Origin")
-	if len(allowed) == 0 {
-		return true
+	// Write the handshake response headers
+	for k, v := range headers {
+		w.Header()[k] = v
 	}
-	for _, o := range allowed {
-		if origin == o {
-			return true
-		}
-	}
-	return false
+	w.WriteHeader(http.StatusSwitchingProtocols)
+
+	// Create and start the WebSocket connection
+	conn := protocol.NewWSConnection(u.transport, u.bufPool, u.channelSize)
+	conn.Start()
+	return conn, nil
 }

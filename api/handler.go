@@ -1,12 +1,11 @@
-// Package api
-// Author: momentics
-//
-// Strongly typed, modular handler contract for events, batches, or messages.
+// File: api/handler.go
+// Package api defines Handler interface.
+// Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 
 package api
 
-// Handler processes events or data batches.
+// Handler processes data payloads.
 type Handler interface {
-    // Handle processes provided event/data; error policy configurable by middleware.
     Handle(data any) error
 }

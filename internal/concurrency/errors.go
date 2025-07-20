@@ -1,4 +1,3 @@
-// File: internal/concurrency/errors.go
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //

@@ -1,52 +1,34 @@
 // File: internal/concurrency/affinity.go
+// Package concurrency provides cross-platform affinity API.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// Cross-platform CPU and NUMA affinity management with runtime detection.
+// Public functions delegate to platform-specific implementations via build tags.
 
 package concurrency
 
-import (
-	"runtime"
-)
-
-// affinitySupported indicates if CPU affinity is supported on this platform.
-var affinitySupported = checkAffinitySupport()
-
-// checkAffinitySupport detects if CPU affinity is available.
-func checkAffinitySupport() bool {
-	// This would be implemented per platform
-	return true
-}
-
-// PreferredCPUID returns the preferred CPU for the given NUMA node.
+// PreferredCPUID returns a recommended CPU core for numaNode; -1 for any.
 func PreferredCPUID(numaNode int) int {
-	if numaNode < 0 {
-		return 0
-	}
 	return platformPreferredCPUID(numaNode)
 }
 
-// CurrentNUMANodeID returns the NUMA node of the current thread.
+// CurrentNUMANodeID returns the NUMA node ID of current thread or -1.
 func CurrentNUMANodeID() int {
 	return platformCurrentNUMANodeID()
 }
 
-// UnpinCurrentThread removes CPU affinity constraints from current thread.
-func UnpinCurrentThread() {
-	if !affinitySupported {
-		return
-	}
-
-	platformUnpinCurrentThread()
-}
-
-// NumCPUs returns the number of logical CPUs.
-func NumCPUs() int {
-	return runtime.NumCPU()
-}
-
-// NUMANodes returns the number of NUMA nodes.
+// NUMANodes returns total NUMA nodes count (>=1).
 func NUMANodes() int {
 	return platformNUMANodes()
+}
+
+// PinCurrentThread binds the current OS thread to CPU and NUMA.
+// cpuID<0 means any CPU, numaNode<0 means any node.
+func PinCurrentThread(numaNode, cpuID int) error {
+	return platformPinCurrentThread(numaNode, cpuID)
+}
+
+// UnpinCurrentThread clears affinity constraints.
+func UnpinCurrentThread() error {
+	return platformUnpinCurrentThread()
 }

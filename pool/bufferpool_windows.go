@@ -1,110 +1,79 @@
 // File: pool/bufferpool_windows.go
+// +build windows
+// Package pool
 // Author: momentics <momentics@gmail.com>
-//
-// Windows large-page buffer pool using VirtualAlloc.
-// Fallback allocs if large pages unavailable.
+// License: Apache-2.0
 
 package pool
 
 import (
-	"sync"
-	"syscall"
-	"unsafe"
+    "sync"
+    "unsafe"
 
-	"github.com/momentics/hioload-ws/api"
-	"golang.org/x/sys/windows"
+    "github.com/momentics/hioload-ws/api"
+    "golang.org/x/sys/windows"
 )
 
 var (
-	kern32           = syscall.NewLazyDLL("kernel32.dll")
-	procVirtualAlloc = kern32.NewProc("VirtualAlloc")
+    kern32           = windows.NewLazySystemDLL("kernel32.dll")
+    procVirtualAlloc = kern32.NewProc("VirtualAlloc")
 )
 
 type windowsBuffer struct {
-	data   []byte
-	pool   *windowsBufferPool
-	numaID int
+    data   []byte
+    pool   *windowsBufferPool
+    numaID int
 }
 
-func (w *windowsBuffer) Bytes() []byte {
-	return w.data
-}
-func (w *windowsBuffer) Copy() []byte {
-	dst := make([]byte, len(w.data))
-	copy(dst, w.data)
-	return dst
-}
-func (w *windowsBuffer) NUMANode() int {
-	return w.numaID
-}
-func (w *windowsBuffer) Release() {
-	w.pool.recycle(w)
-}
-func (w *windowsBuffer) Slice(from, to int) api.Buffer {
-	if from < 0 || to > len(w.data) || from > to {
-		return nil
-	}
-	nb := *w
-	nb.data = nb.data[from:to]
-	return &nb
-}
+func (b *windowsBuffer) Bytes() []byte               { return b.data }
+func (b *windowsBuffer) Release()                    { b.pool.recycle(b) }
+func (b *windowsBuffer) Copy() []byte                { c := make([]byte, len(b.data)); copy(c, b.data); return c }
+func (b *windowsBuffer) NUMANode() int               { return b.numaID }
+func (b *windowsBuffer) Slice(from, to int) api.Buffer { return &windowsBuffer{data: b.data[from:to], pool: b.pool, numaID: b.numaID} }
 
 type windowsBufferPool struct {
-	pools map[int]chan *windowsBuffer
-	mu    sync.Mutex
+    pools map[int]chan *windowsBuffer
+    mu    sync.Mutex
 }
 
 func newBufferPool(numaNode int) api.BufferPool {
-	wp := &windowsBufferPool{pools: make(map[int]chan *windowsBuffer)}
-	wp.pools[numaNode] = make(chan *windowsBuffer, 1024)
-	return wp
+    return &windowsBufferPool{pools: map[int]chan *windowsBuffer{numaNode: make(chan *windowsBuffer, 1024)}}
 }
 
-func (bp *windowsBufferPool) Get(size, numaPreferred int) api.Buffer {
-	bp.mu.Lock()
-	ch, ok := bp.pools[numaPreferred]
-	if !ok {
-		ch = make(chan *windowsBuffer, 1024)
-		bp.pools[numaPreferred] = ch
-	}
-	bp.mu.Unlock()
-	select {
-	case buf := <-ch:
-		if cap(buf.data) < size {
-			buf.data = make([]byte, size)
-		} else {
-			buf.data = buf.data[:size]
-		}
-		return buf
-	default:
-		// Try VirtualAlloc large page; fallback to slice
-		addr, _, _ := procVirtualAlloc.Call(0, uintptr(size),
-			windows.MEM_RESERVE|windows.MEM_COMMIT|windows.MEM_LARGE_PAGES,
-			syscall.PAGE_READWRITE)
-		var slice []byte
-		if addr == 0 {
-			slice = make([]byte, size)
-		} else {
-			slice = (*[1 << 30]byte)(unsafe.Pointer(addr))[:size:size]
-		}
-		return &windowsBuffer{data: slice, pool: bp, numaID: numaPreferred}
-	}
+func (p *windowsBufferPool) Get(size, numaPref int) api.Buffer {
+    p.mu.Lock()
+    ch := p.pools[numaPref]
+    p.mu.Unlock()
+    select {
+    case buf := <-ch:
+        if cap(buf.data) < size {
+            buf.data = make([]byte, size)
+        } else {
+            buf.data = buf.data[:size]
+        }
+        return buf
+    default:
+        addr, _, err := procVirtualAlloc.Call(
+            0, uintptr(size),
+            windows.MEM_RESERVE|windows.MEM_COMMIT|0x20000000,
+            windows.PAGE_READWRITE,
+        )
+        if addr == 0 || err != nil {
+            return &windowsBuffer{data: make([]byte, size), pool: p, numaID: numaPref}
+        }
+        data := unsafe.Slice((*byte)(unsafe.Pointer(addr)), size)
+        return &windowsBuffer{data: data, pool: p, numaID: numaPref}
+    }
 }
 
-func (bp *windowsBufferPool) Put(b api.Buffer) {
-	if wb, ok := b.(*windowsBuffer); ok {
-		select {
-		case bp.pools[wb.numaID] <- wb:
-		default:
-			// drop if pool full
-		}
-	}
+func (p *windowsBufferPool) Put(b api.Buffer) {
+    if wb, ok := b.(*windowsBuffer); ok {
+        select {
+        case p.pools[wb.numaID] <- wb:
+        default:
+        }
+    }
 }
 
-func (bp *windowsBufferPool) Stats() api.BufferPoolStats {
-	return api.BufferPoolStats{}
-}
-
-func (bp *windowsBufferPool) recycle(b *windowsBuffer) {
-	bp.Put(b)
-}
+func (p *windowsBufferPool) Stats() api.BufferPoolStats { return api.BufferPoolStats{} }
+func (p *windowsBufferPool) recycle(b *windowsBuffer)   { p.Put(b) }

@@ -1,26 +1,15 @@
 // File: api/control.go
-// Package api
-// Author: momentics
-//
-// Runtime configuration, statistics, dynamic reload and debug contract for highload systems.
+// Package api defines Control interface.
+// Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 
 package api
 
-// Control exposes configuration, live metrics and debug API.
+// Control manages dynamic config and runtime metrics.
 type Control interface {
-    // GetConfig returns a snapshot of all configuration settings.
     GetConfig() map[string]any
-
-    // SetConfig atomically updates or merges configuration settings.
     SetConfig(cfg map[string]any) error
-
-    // Stats returns current aggregated runtime and performance metrics.
     Stats() map[string]any
-
-    // OnReload registers a callback for hot-reload/config updates.
     OnReload(fn func())
-
-    // RegisterDebugProbe dynamically registers a named debug probe function.
-    // The probe is invoked during debug dumps and health checks.
     RegisterDebugProbe(name string, fn func() any)
 }

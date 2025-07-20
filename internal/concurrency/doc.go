@@ -1,4 +1,3 @@
-// File: internal/concurrency/doc.go
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
