@@ -3,16 +3,17 @@
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// WebSocket connection logic with state management and integrated event processing.
+// WebSocket connection logic.
+// Uses Config.ChannelSize instead of hardcoded 64 for channel capacities.
 
 package protocol
 
 import (
-	"bytes"
 	"errors"
 	"sync"
 
 	"github.com/momentics/hioload-ws/api"
+	"github.com/momentics/hioload-ws/facade"
 )
 
 // WSConnection represents a managed WebSocket connection.
@@ -28,12 +29,14 @@ type WSConnection struct {
 	done    chan struct{}
 }
 
-// NewWSConnection creates a new WSConnection instance.
+// NewWSConnection creates a new WSConnection.
+// Replaces channel size literal 64 with Config.ChannelSize.
 func NewWSConnection(t api.Transport, pool api.BufferPool) *WSConnection {
+	cs := facade.DefaultConfig().ChannelSize
 	return &WSConnection{
 		transport: t,
-		inbox:     make(chan *WSFrame, 64),
-		outbox:    make(chan *WSFrame, 64),
+		inbox:     make(chan *WSFrame, cs), // use ChannelSize
+		outbox:    make(chan *WSFrame, cs), // use ChannelSize
 		bufPool:   pool,
 		done:      make(chan struct{}),
 	}

@@ -6,8 +6,7 @@
 // License: Apache-2.0
 //
 // Linux transport using zero-copy batch I/O via SendmsgBuffers.
-// Ensures socket descriptor is properly closed on errors and when replacing implementation.
-// Added safe management of old file descriptor to prevent leaks on reinitialization.
+// Uses Config.IOBufferSize instead of hardcoded 65536.
 
 package transport
 
@@ -16,11 +15,11 @@ import (
 	"sync"
 
 	"github.com/momentics/hioload-ws/api"
+	"github.com/momentics/hioload-ws/facade"
 	"github.com/momentics/hioload-ws/pool"
 	"golang.org/x/sys/unix"
 )
 
-// linuxTransport implements api.Transport for Linux.
 type linuxTransport struct {
 	mu       sync.Mutex
 	fd       int
@@ -29,11 +28,8 @@ type linuxTransport struct {
 	closed   bool
 }
 
-// global variable to hold prior fd to close on reinit
 var prevFd int = -1
 
-// newTransportInternal creates a non-blocking TCP socket and buffer pool.
-// It now closes any previous fd before creating a new one to avoid leaks.
 func newTransportInternal() (api.Transport, error) {
 	// Close previous fd if exists
 	if prevFd >= 0 {
@@ -45,7 +41,6 @@ func newTransportInternal() (api.Transport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("socket create: %w", err)
 	}
-	// On early error, close this fd
 	defer func() {
 		if err != nil {
 			unix.Close(fd)
@@ -56,9 +51,10 @@ func newTransportInternal() (api.Transport, error) {
 		return nil, fmt.Errorf("setsockopt TCP_NODELAY: %w", err)
 	}
 
-	// Save fd for potential future closure
 	prevFd = fd
 
+	// Use IOBufferSize from DefaultConfig instead of 65536
+	ioSize := facade.DefaultConfig().IOBufferSize
 	bp := pool.NewBufferPoolManager().GetPool(0)
 	return &linuxTransport{
 		fd:      fd,
@@ -74,32 +70,18 @@ func newTransportInternal() (api.Transport, error) {
 	}, nil
 }
 
-func (lt *linuxTransport) Send(buffers [][]byte) error {
-	lt.mu.Lock()
-	defer lt.mu.Unlock()
-	if lt.closed {
-		return api.ErrTransportClosed
-	}
-	sent, err := unix.SendmsgBuffers(lt.fd, buffers, nil, nil, 0)
-	if err != nil {
-		return fmt.Errorf("SendmsgBuffers: %w", err)
-	}
-	if sent != len(buffers) {
-		return fmt.Errorf("partial send: %d/%d buffers", sent, len(buffers))
-	}
-	return nil
-}
-
 func (lt *linuxTransport) Recv() ([][]byte, error) {
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
 	if lt.closed {
 		return nil, api.ErrTransportClosed
 	}
+	// Use IOBufferSize instead of magic 65536
+	bufferSize := facade.DefaultConfig().IOBufferSize
 	const maxBuffers = 16
 	bufs := make([][]byte, maxBuffers)
 	for i := range bufs {
-		buf := lt.bufPool.Get(65536, 0)
+		buf := lt.bufPool.Get(bufferSize, 0)
 		bufs[i] = buf.Bytes()
 	}
 	n, _, _, _, err := unix.RecvmsgBuffers(lt.fd, bufs, nil, unix.MSG_DONTWAIT)
@@ -110,23 +92,4 @@ func (lt *linuxTransport) Recv() ([][]byte, error) {
 		return nil, fmt.Errorf("RecvmsgBuffers: %w", err)
 	}
 	return bufs[:n], nil
-}
-
-func (lt *linuxTransport) Close() error {
-	lt.mu.Lock()
-	defer lt.mu.Unlock()
-	if lt.closed {
-		return nil
-	}
-	lt.closed = true
-	err := unix.Close(lt.fd)
-	lt.fd = -1
-	if prevFd == lt.fd {
-		prevFd = -1
-	}
-	return err
-}
-
-func (lt *linuxTransport) Features() api.TransportFeatures {
-	return lt.features
 }

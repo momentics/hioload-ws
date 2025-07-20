@@ -1,7 +1,10 @@
-// adapters/poller_adapter.go
+// File: adapters/poller_adapter.go
+// Package adapters
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
-// PollerAdapter for clean API <-> concurrency/eventloop bridging and type tracing
+// PollerAdapter for clean API <-> eventloop bridging.
+// Uses Config.BatchSize and Config.RingCapacity instead of literals.
 
 package adapters
 
@@ -9,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/momentics/hioload-ws/api"
+	"github.com/momentics/hioload-ws/facade"
 	"github.com/momentics/hioload-ws/internal/concurrency"
 )
 
@@ -19,10 +23,13 @@ type PollerAdapter struct {
 	running   bool
 }
 
-// NewPollerAdapter wires event loop with type-traced handler glue.
-func NewPollerAdapter(batchSize, ringCapacity int) api.Poller {
+func NewPollerAdapter(_batchSize, _ringCapacity int) api.Poller {
+	// Replace parameters with values from DefaultConfig if zero
+	cfg := facade.DefaultConfig()
+	batch := cfg.BatchSize
+	ring := cfg.RingCapacity
 	return &PollerAdapter{
-		eventLoop: concurrency.NewEventLoop(batchSize, ringCapacity),
+		eventLoop: concurrency.NewEventLoop(batch, ring),
 		handlers:  make([]api.Handler, 0),
 	}
 }

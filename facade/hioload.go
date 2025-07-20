@@ -43,9 +43,10 @@ type Config struct {
 	NumWorkers    int
 	NUMANode      int
 	CPUAffinity   bool
-	BufferSize    int
-	RingCapacity  int
-	BatchSize     int
+	IOBufferSize  int // moved from hardcoded 65536
+	ChannelSize   int // new: capacity for inbox/outbox channels
+	RingCapacity  int // moved from hardcoded 1024
+	BatchSize     int // moved from hardcoded 16
 	TransportType string
 	ListenAddr    string
 	SessionShards int
@@ -54,14 +55,16 @@ type Config struct {
 }
 
 // DefaultConfig returns default config.
+// All magic numbers centralized here.
 func DefaultConfig() *Config {
 	return &Config{
 		NumWorkers:    4,
 		NUMANode:      -1,
 		CPUAffinity:   true,
-		BufferSize:    65536,
-		RingCapacity:  1024,
-		BatchSize:     16,
+		IOBufferSize:  64 * 1024,   // default IO buffer size (65536)
+		ChannelSize:   64,          // default WSConnection inbox/outbox capacity
+		RingCapacity:  1024,        // default event loop ring buffer capacity
+		BatchSize:     16,          // default event loop batch size
 		TransportType: "tcp",
 		ListenAddr:    ":8080",
 		SessionShards: 16,
