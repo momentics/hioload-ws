@@ -1,55 +1,83 @@
+// File: protocol/connection.go
 // Package protocol
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
-// WebSocket connection logic with state management, control frame tracking,
-// and integration into reactor/transport/pool layers.
+// WebSocket connection logic with state management and integrated event processing.
+//
+// Added SetHandler to attach an api.Handler for incoming frames.
 
 package protocol
 
 import (
+	"bytes"
 	"errors"
-	"io"
 	"sync"
 
-	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
 )
 
-// WSConnection represents a full connection state machine.
 type WSConnection struct {
 	transport api.Transport
 	inbox     chan *WSFrame
 	outbox    chan *WSFrame
 	bufPool   api.BufferPool
-	closed    bool
-	mu        sync.Mutex
+
+	mu      sync.RWMutex
+	handler api.Handler
+	closed  bool
+	done    chan struct{}
 }
 
-func (c *WSConnection) SetHandler(mw *adapters.MiddlewareHandler) {
-	panic("unimplemented")
-}
+// Ensure compile-time interface compliance if needed
+// var _ api.Handler = (*WSConnection)(nil)
 
-func (c *WSConnection) Recv() (any, any) {
-	panic("unimplemented")
-}
-
-// NewWSConnection constructs a new connection from transport and buffers.
 func NewWSConnection(t api.Transport, pool api.BufferPool) *WSConnection {
 	return &WSConnection{
 		transport: t,
 		inbox:     make(chan *WSFrame, 64),
 		outbox:    make(chan *WSFrame, 64),
 		bufPool:   pool,
+		done:      make(chan struct{}),
 	}
 }
 
-// Start launches internal recv loop.
-func (c *WSConnection) Start() {
-	go c.recvLoop()
+// SetHandler attaches a Handler to process incoming messages.
+func (c *WSConnection) SetHandler(h api.Handler) {
+	c.mu.Lock()
+	c.handler = h
+	c.mu.Unlock()
 }
 
-// Send queues a frame for transmission.
+// Start launches internal recv and send loops.
+func (c *WSConnection) Start() {
+	go c.recvLoop()
+	go c.sendLoop()
+}
+
+// Done returns a channel closed when connection is closed.
+func (c *WSConnection) Done() <-chan struct{} {
+	return c.done
+}
+
+// Recv reads the next batch of buffers from the WebSocket.
+func (c *WSConnection) Recv() ([]api.Buffer, error) {
+	frame, ok := <-c.inbox
+	if !ok {
+		return nil, errors.New("connection closed")
+	}
+	buf := c.bufPool.Get(int(frame.PayloadLen), 0)
+	copy(buf.Bytes(), frame.Payload)
+	return []api.Buffer{buf}, nil
+}
+
+// Send enqueues a frame for transmission.
 func (c *WSConnection) Send(f *WSFrame) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.closed {
+		return errors.New("connection closed")
+	}
 	select {
 	case c.outbox <- f:
 		return nil
@@ -58,52 +86,52 @@ func (c *WSConnection) Send(f *WSFrame) error {
 	}
 }
 
-// recvLoop reads frames and parses them into inbox channel.
-func (c *WSConnection) recvLoop() {
-	for !c.closed {
-		chunks, err := c.transport.Recv()
-		if err != nil {
-			continue // optionally log or close
-		}
-		for _, b := range chunks {
-			reader := bytesAsReader(b)
-			frame, err := DecodeFrame(reader)
-			if err != nil {
-				continue
-			}
-			c.inbox <- frame
-		}
-	}
-}
-
-// Close gracefully shuts down connection.
-func (c *WSConnection) Close() {
+// Close gracefully shuts down the connection.
+func (c *WSConnection) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return
+		return nil
 	}
-	_ = c.transport.Close()
 	c.closed = true
-	close(c.inbox)
 	close(c.outbox)
+	_ = c.transport.Close()
+	close(c.inbox)
+	close(c.done)
+	return nil
 }
 
-// bytesAsReader provides io.Reader over byte slice without allocation.
-func bytesAsReader(b []byte) io.Reader {
-	return &readerFromBytes{buf: b}
-}
-
-type readerFromBytes struct {
-	buf []byte
-	pos int
-}
-
-func (r *readerFromBytes) Read(p []byte) (int, error) {
-	if r.pos >= len(r.buf) {
-		return 0, io.EOF
+func (c *WSConnection) recvLoop() {
+	defer c.Close()
+	for {
+		raws, err := c.transport.Recv()
+		if err != nil {
+			return
+		}
+		for _, raw := range raws {
+			frame, err := DecodeFrame(bytes.NewReader(raw))
+			if err != nil {
+				continue
+			}
+			select {
+			case c.inbox <- frame:
+			default:
+				// drop if inbox full
+			}
+		}
 	}
-	n := copy(p, r.buf[r.pos:])
-	r.pos += n
-	return n, nil
+}
+
+func (c *WSConnection) sendLoop() {
+	for f := range c.outbox {
+		buf := encodeFrameBuffer(f)
+		_ = c.transport.Send([][]byte{buf})
+	}
+}
+
+// encodeFrameBuffer encodes a WSFrame into a byte slice.
+func encodeFrameBuffer(f *WSFrame) []byte {
+	dst := make([]byte, f.PayloadLen+14)
+	n, _ := EncodeFrame(dst, f.Opcode, f.Payload, false)
+	return dst[:n]
 }

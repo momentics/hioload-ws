@@ -1,4 +1,5 @@
-// internal/websocket/connection.go
+// File: internal/websocket/connection.go
+// Package websocket
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
@@ -16,6 +17,7 @@ import (
 	"github.com/momentics/hioload-ws/protocol"
 )
 
+// Connection represents a managed WebSocket connection.
 type Connection struct {
 	wsConn       *protocol.WSConnection
 	bufferPool   api.BufferPool
@@ -24,10 +26,13 @@ type Connection struct {
 	cancel       context.CancelFunc
 	pingInterval time.Duration
 	pongTimeout  time.Duration
-	mu           sync.RWMutex
-	closed       bool
+
+	mu     sync.RWMutex
+	closed bool
+	done   chan struct{}
 }
 
+// NewConnection creates a new Connection.
 func NewConnection(wsConn *protocol.WSConnection, bufferPool api.BufferPool) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Connection{
@@ -37,15 +42,18 @@ func NewConnection(wsConn *protocol.WSConnection, bufferPool api.BufferPool) *Co
 		cancel:       cancel,
 		pingInterval: 30 * time.Second,
 		pongTimeout:  10 * time.Second,
+		done:         make(chan struct{}),
 	}
 }
 
+// SetHandler sets the api.Handler for incoming messages.
 func (c *Connection) SetHandler(handler api.Handler) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.handler = handler
 }
 
+// Start begins the receive and keepalive loops.
 func (c *Connection) Start() error {
 	c.wsConn.Start()
 	go c.keepAlive()
@@ -53,7 +61,12 @@ func (c *Connection) Start() error {
 	return nil
 }
 
-// messageLoop reads from transport and dispatches to handler.
+// Done returns a channel that's closed when the connection is fully closed.
+func (c *Connection) Done() <-chan struct{} {
+	return c.done
+}
+
+// messageLoop reads frames and dispatches to handler.
 func (c *Connection) messageLoop() {
 	defer c.Close()
 	for {
@@ -61,14 +74,8 @@ func (c *Connection) messageLoop() {
 		case <-c.ctx.Done():
 			return
 		default:
-			raw, err := c.wsConn.Recv()
+			bufs, err := c.wsConn.Recv() // Recv now returns ([]api.Buffer, error)
 			if err != nil {
-				return
-			}
-			// Expect raw to be []api.Buffer
-			bufs, ok := raw.([]api.Buffer)
-			if !ok {
-				// Unexpected type; abort
 				return
 			}
 			for _, buf := range bufs {
@@ -80,6 +87,8 @@ func (c *Connection) messageLoop() {
 		}
 	}
 }
+
+// keepAlive sends periodic pings to keep the connection alive.
 func (c *Connection) keepAlive() {
 	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
@@ -97,6 +106,7 @@ func (c *Connection) keepAlive() {
 	}
 }
 
+// Send allows sending a single frame on the connection.
 func (c *Connection) Send(frame *protocol.WSFrame) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -106,6 +116,7 @@ func (c *Connection) Send(frame *protocol.WSFrame) error {
 	return c.wsConn.Send(frame)
 }
 
+// Close gracefully terminates the connection.
 func (c *Connection) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -114,6 +125,7 @@ func (c *Connection) Close() error {
 	}
 	c.closed = true
 	c.cancel()
-	c.wsConn.Close() // removed assignment since Close() returns no value
+	_ = c.wsConn.Close()
+	close(c.done)
 	return nil
 }
