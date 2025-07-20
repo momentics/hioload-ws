@@ -72,6 +72,51 @@ func NewExecutor(numWorkers, numaNode int) *Executor {
 	return e
 }
 
+// Close gracefully shuts down the executor and all workers.
+func (e *Executor) Close() {
+	e.CloseWithTimeout(0)
+}
+
+// CloseWithTimeout gracefully shuts down the executor and all workers.
+// It waits up to the given timeout for workers to exit. Zero timeout waits indefinitely.
+func (e *Executor) CloseWithTimeout(timeout time.Duration) {
+	e.closeOnce.Do(func() {
+		atomic.StoreInt32(&e.closed, 1)
+		close(e.closeCh)
+		// stop all workers
+		e.resizeMu.Lock()
+		for _, w := range e.workers {
+			close(w.stopCh)
+		}
+		e.resizeMu.Unlock()
+		// wait for workers to exit
+		done := make(chan struct{})
+		go func() {
+			var wg sync.WaitGroup
+			for _, w := range e.workers {
+				wg.Add(1)
+				go func(worker *worker) {
+					defer wg.Done()
+					for atomic.LoadInt32(&worker.stopped) == 0 {
+						time.Sleep(time.Millisecond)
+					}
+				}(w)
+			}
+			wg.Wait()
+			close(done)
+		}()
+
+		if timeout <= 0 {
+			<-done
+		} else {
+			select {
+			case <-done:
+			case <-time.After(timeout):
+			}
+		}
+	})
+}
+
 // Submit submits a task for execution.
 // It will attempt local queue, then global, and return ErrExecutorClosed if closed.
 func (e *Executor) Submit(task TaskFunc) error {
