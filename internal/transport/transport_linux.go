@@ -1,4 +1,4 @@
-// internal/transport/transport_linux.go
+// File: internal/transport/transport_linux.go
 //go:build linux
 // +build linux
 
@@ -7,6 +7,7 @@
 // License: Apache-2.0
 //
 // Linux transport using zero-copy batch I/O via SendmsgBuffers.
+// Ensures socket descriptor is properly closed on errors and when replacing implementation.
 
 package transport
 
@@ -18,10 +19,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// linuxTransport implements api.Transport for Linux.
 type linuxTransport struct {
 	fd       int
 	bufPool  api.BufferPool
 	features api.TransportFeatures
+	closed   bool
 }
 
 // newTransportInternal creates a non-blocking TCP socket and buffer pool.
@@ -30,7 +33,17 @@ func newTransportInternal() (api.Transport, error) {
 	if err != nil {
 		return nil, fmt.Errorf("socket create: %w", err)
 	}
-	_ = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
+	// Ensure fd is closed on any early error
+	defer func() {
+		if err != nil {
+			unix.Close(fd)
+		}
+	}()
+
+	if err = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1); err != nil {
+		return nil, fmt.Errorf("setsockopt TCP_NODELAY: %w", err)
+	}
+
 	bp := pool.NewBufferPoolManager().GetPool(0)
 	return &linuxTransport{
 		fd:      fd,
@@ -48,8 +61,9 @@ func newTransportInternal() (api.Transport, error) {
 
 // Send sends all buffers in one atomic batch via SendmsgBuffers.
 func (lt *linuxTransport) Send(buffers [][]byte) error {
-	// SendmsgBuffers signature: SendmsgBuffers(fd int, buffers [][]byte, oob []byte, to unix.Sockaddr, flags int) (n int, err error)
-	// Since socket is connected, we pass to = nil and flags = 0 (blocking) or MSG_DONTWAIT as needed.
+	if lt.closed {
+		return api.ErrTransportClosed
+	}
 	sent, err := unix.SendmsgBuffers(lt.fd, buffers, nil, nil, 0)
 	if err != nil {
 		return fmt.Errorf("SendmsgBuffers: %w", err)
@@ -62,13 +76,15 @@ func (lt *linuxTransport) Send(buffers [][]byte) error {
 
 // Recv reads up to maxBuffers via RecvmsgBuffers and returns slices trimmed to lengths.
 func (lt *linuxTransport) Recv() ([][]byte, error) {
+	if lt.closed {
+		return nil, api.ErrTransportClosed
+	}
 	const maxBuffers = 16
 	bufs := make([][]byte, maxBuffers)
 	for i := range bufs {
 		buf := lt.bufPool.Get(65536, 0)
 		bufs[i] = buf.Bytes()
 	}
-	// RecvmsgBuffers(fd int, buffers [][]byte, oob []byte, flags int) (n, oobn int, recvflags int, from unix.Sockaddr, err error)
 	n, _, _, _, err := unix.RecvmsgBuffers(lt.fd, bufs, nil, unix.MSG_DONTWAIT)
 	if err != nil {
 		if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
@@ -79,8 +95,12 @@ func (lt *linuxTransport) Recv() ([][]byte, error) {
 	return bufs[:n], nil
 }
 
-// Close closes the socket.
+// Close closes the socket and prevents further operations.
 func (lt *linuxTransport) Close() error {
+	if lt.closed {
+		return nil
+	}
+	lt.closed = true
 	return unix.Close(lt.fd)
 }
 
