@@ -4,8 +4,6 @@
 // License: Apache-2.0
 //
 // WebSocket connection logic with state management and integrated event processing.
-//
-// Added SetHandler to attach an api.Handler for incoming frames.
 
 package protocol
 
@@ -17,6 +15,7 @@ import (
 	"github.com/momentics/hioload-ws/api"
 )
 
+// WSConnection represents a managed WebSocket connection.
 type WSConnection struct {
 	transport api.Transport
 	inbox     chan *WSFrame
@@ -29,9 +28,7 @@ type WSConnection struct {
 	done    chan struct{}
 }
 
-// Ensure compile-time interface compliance if needed
-// var _ api.Handler = (*WSConnection)(nil)
-
+// NewWSConnection creates a new WSConnection instance.
 func NewWSConnection(t api.Transport, pool api.BufferPool) *WSConnection {
 	return &WSConnection{
 		transport: t,
@@ -42,20 +39,13 @@ func NewWSConnection(t api.Transport, pool api.BufferPool) *WSConnection {
 	}
 }
 
-// SetHandler attaches a Handler to process incoming messages.
-func (c *WSConnection) SetHandler(h api.Handler) {
-	c.mu.Lock()
-	c.handler = h
-	c.mu.Unlock()
-}
-
-// Start launches internal recv and send loops.
+// Start launches internal receive and send loops.
 func (c *WSConnection) Start() {
 	go c.recvLoop()
 	go c.sendLoop()
 }
 
-// Done returns a channel closed when connection is closed.
+// Done returns a channel closed when the connection is fully closed.
 func (c *WSConnection) Done() <-chan struct{} {
 	return c.done
 }
@@ -86,7 +76,7 @@ func (c *WSConnection) Send(f *WSFrame) error {
 	}
 }
 
-// Close gracefully shuts down the connection.
+// Close gracefully terminates the connection.
 func (c *WSConnection) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -94,18 +84,28 @@ func (c *WSConnection) Close() error {
 		return nil
 	}
 	c.closed = true
+	// close outgoing channel to stop sendLoop
 	close(c.outbox)
+	// close transport
 	_ = c.transport.Close()
+	// close inbox to stop messageLoop
 	close(c.inbox)
+	// signal done
 	close(c.done)
 	return nil
 }
 
+// recvLoop reads raw data from transport, decodes frames, and sends to inbox.
 func (c *WSConnection) recvLoop() {
 	defer c.Close()
 	for {
 		raws, err := c.transport.Recv()
 		if err != nil {
+			if err == api.ErrTransportClosed {
+				// transport closed, exit loop
+				return
+			}
+			// other errors, exit
 			return
 		}
 		for _, raw := range raws {
@@ -122,8 +122,14 @@ func (c *WSConnection) recvLoop() {
 	}
 }
 
+// sendLoop reads frames from outbox and sends via transport.
 func (c *WSConnection) sendLoop() {
-	for f := range c.outbox {
+	for {
+		f, ok := <-c.outbox
+		if !ok {
+			// outbox closed, exit sendLoop
+			return
+		}
 		buf := encodeFrameBuffer(f)
 		_ = c.transport.Send([][]byte{buf})
 	}
@@ -134,4 +140,11 @@ func encodeFrameBuffer(f *WSFrame) []byte {
 	dst := make([]byte, f.PayloadLen+14)
 	n, _ := EncodeFrame(dst, f.Opcode, f.Payload, false)
 	return dst[:n]
+}
+
+// SetHandler attaches a Handler to process incoming messages.
+func (c *WSConnection) SetHandler(h api.Handler) {
+	c.mu.Lock()
+	c.handler = h
+	c.mu.Unlock()
 }

@@ -1,4 +1,5 @@
 // File: internal/concurrency/eventloop.go
+// Package concurrency
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
@@ -23,13 +24,6 @@ type EventHandler interface {
 	HandleEvent(event Event)
 }
 
-// EventHandlerFunc is a function adapter for EventHandler.
-type EventHandlerFunc func(Event)
-
-func (f EventHandlerFunc) HandleEvent(event Event) {
-	f(event)
-}
-
 // EventLoop provides a high-performance, poll-mode event processing loop.
 type EventLoop struct {
 	eventQueue *RingBuffer[Event]
@@ -47,9 +41,8 @@ func NewEventLoop(batchSize, queueSize int) *EventLoop {
 		batchSize = 16
 	}
 	if queueSize <= 0 || (queueSize&(queueSize-1)) != 0 {
-		queueSize = 1024 // Default power of 2
+		queueSize = 1024
 	}
-
 	loop := &EventLoop{
 		eventQueue: NewRingBuffer[Event](uint64(queueSize)),
 		batchSize:  batchSize,
@@ -57,7 +50,6 @@ func NewEventLoop(batchSize, queueSize int) *EventLoop {
 		backoffNs:  1,
 	}
 	loop.handlers.Store([]EventHandler{})
-
 	return loop
 }
 
@@ -68,7 +60,6 @@ func (el *EventLoop) RegisterHandler(handler EventHandler) {
 		new := make([]EventHandler, len(old)+1)
 		copy(new, old)
 		new[len(old)] = handler
-
 		if el.handlers.CompareAndSwap(old, new) {
 			break
 		}
@@ -80,13 +71,11 @@ func (el *EventLoop) UnregisterHandler(handler EventHandler) {
 	for {
 		old := el.handlers.Load().([]EventHandler)
 		new := make([]EventHandler, 0, len(old))
-
 		for _, h := range old {
 			if h != handler {
 				new = append(new, h)
 			}
 		}
-
 		if el.handlers.CompareAndSwap(old, new) {
 			break
 		}
@@ -114,10 +103,8 @@ func (el *EventLoop) Run() {
 		default:
 			processed := el.processBatch(batch)
 			if processed > 0 {
-				// Reset backoff on successful processing
 				atomic.StoreInt64(&el.backoffNs, 1)
 			} else {
-				// Apply adaptive backoff
 				el.adaptiveBackoff()
 			}
 		}
@@ -129,7 +116,6 @@ func (el *EventLoop) processBatch(batch []Event) int {
 	processed := 0
 	handlers := el.handlers.Load().([]EventHandler)
 
-	// Fill batch
 	for i := 0; i < el.batchSize; i++ {
 		if event, ok := el.eventQueue.Dequeue(); ok {
 			batch[i] = event
@@ -139,31 +125,32 @@ func (el *EventLoop) processBatch(batch []Event) int {
 		}
 	}
 
-	// Process batch
 	for i := 0; i < processed; i++ {
 		for _, handler := range handlers {
 			handler.HandleEvent(batch[i])
 		}
 	}
-
 	return processed
 }
 
-// adaptiveBackoff implements exponential backoff with cap.
+// adaptiveBackoff implements exponential backoff with cap and stop check.
 func (el *EventLoop) adaptiveBackoff() {
-	backoff := atomic.LoadInt64(&el.backoffNs)
+	// check for stop
+	select {
+	case <-el.stopCh:
+		return
+	default:
+	}
 
-	// Busy wait for short durations
+	backoff := atomic.LoadInt64(&el.backoffNs)
 	if backoff < 1000 {
-		for i := int64(0); i < backoff; i++ {
-			// CPU pause instruction would be ideal here
-		}
+		// busy-wait short duration
+		time.Sleep(time.Microsecond)
 	} else {
-		// Use scheduler yield for longer waits
+		// yield scheduler for longer waits
 		runtime.Gosched()
 	}
 
-	// Exponential backoff up to 1ms
 	newBackoff := backoff * 2
 	if newBackoff > 1_000_000 {
 		newBackoff = 1_000_000
@@ -175,8 +162,6 @@ func (el *EventLoop) adaptiveBackoff() {
 func (el *EventLoop) Stop() {
 	if atomic.LoadInt32(&el.running) == 1 {
 		close(el.stopCh)
-
-		// Wait for loop to stop
 		for atomic.LoadInt32(&el.stopped) == 0 {
 			time.Sleep(time.Microsecond * 100)
 		}
