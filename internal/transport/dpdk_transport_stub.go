@@ -1,4 +1,5 @@
 // internal/transport/dpdk_transport_stub.go
+//go:build !dpdk
 // +build !dpdk
 
 // Author: momentics <momentics@gmail.com>

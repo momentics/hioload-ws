@@ -1,18 +1,18 @@
 // internal/transport/dpdk_transport.go
+//go:build dpdk
 // +build dpdk
 
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
 // DPDK-backed transport for hioload-ws.
-// This file is only built and included if the `dpdk` build tag is provided. 
+// This file is only built and included if the `dpdk` build tag is provided.
 // If DPDK is not available, the stub (see dpdk_transport_stub.go) is used.
 
 package transport
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/momentics/hioload-ws/api"

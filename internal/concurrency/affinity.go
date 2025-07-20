@@ -1,34 +1,55 @@
+//go:build windows
+// +build windows
+
+// File: internal/concurrency/affinity.go
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// NUMA topology detection via libnuma/hwloc and proper thread pinning.
+// Cross-platform CPU and NUMA affinity management with runtime detection.
 
 package concurrency
 
-/*
-#cgo LDFLAGS: -lnuma -lhwloc
-#include <numa.h>
-#include <hwloc.h>
-*/
-import "C"
+import (
+	"runtime"
+)
 
-// PreferredCPUID returns logical CPU index for given NUMA node.
-func PreferredCPUID(numaNode int) int {
-    topo := C.hwloc_topology_alloc()
-    C.hwloc_topology_load(topo)
-    objs := C.hwloc_get_obj_by_type(topo, C.HWLOC_OBJ_NODE, C.uint(numaNode))
-    if objs == nil {
-        return 0
-    }
-    core := C.hwloc_get_obj_inside_cpuset_by_type(topo, objs.cpuset, C.HWLOC_OBJ_CORE, 0)
-    return int(core.logical_index)
+// affinitySupported indicates if CPU affinity is supported on this platform.
+var affinitySupported = checkAffinitySupport()
+
+// checkAffinitySupport detects if CPU affinity is available.
+func checkAffinitySupport() bool {
+	// This would be implemented per platform
+	return true
 }
 
-// CurrentNUMANodeID returns NUMA node of current CPU.
+// PreferredCPUID returns the preferred CPU for the given NUMA node.
+func PreferredCPUID(numaNode int) int {
+	if numaNode < 0 {
+		return 0
+	}
+	return platformPreferredCPUID(numaNode)
+}
+
+// CurrentNUMANodeID returns the NUMA node of the current thread.
 func CurrentNUMANodeID() int {
-    if C.numa_available() < 0 {
-        return 0
-    }
-    cpu := C.sched_getcpu()
-    return int(C.numa_node_of_cpu(cpu))
+	return platformCurrentNUMANodeID()
+}
+
+// UnpinCurrentThread removes CPU affinity constraints from current thread.
+func UnpinCurrentThread() {
+	if !affinitySupported {
+		return
+	}
+
+	platformUnpinCurrentThread()
+}
+
+// NumCPUs returns the number of logical CPUs.
+func NumCPUs() int {
+	return runtime.NumCPU()
+}
+
+// NUMANodes returns the number of NUMA nodes.
+func NUMANodes() int {
+	return platformNUMANodes()
 }

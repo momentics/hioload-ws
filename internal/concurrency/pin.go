@@ -1,5 +1,5 @@
-//go:build !windows !linux
-// +build !windows !linux
+//go:build !windows
+// +build !windows
 
 // hioload-ws/internal/concurrency/pin.go
 // Author: momentics <momentics@gmail.com>
