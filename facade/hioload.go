@@ -1,3 +1,4 @@
+// File: facade/hioload.go
 // Package facade
 // Author: momentics <momentics@gmail.com>
 //
@@ -88,7 +89,6 @@ func New(config *Config) (*HioloadWS, error) {
 
 	// DPDK integration block
 	if config.UseDPDK {
-		// The dpdk submodule only gets compiled if tagged in build (see dpdk_transport.go).
 		transportImpl, err = transport.NewDPDKTransport(config.DPDKMode)
 		if err != nil {
 			log.Printf("[facade] DPDK unavailable or init failed: %v, fallback to native transport", err)
@@ -199,6 +199,15 @@ func (h *HioloadWS) Poll(maxEvents int) (int, error) {
 	return h.poller.Poll(maxEvents)
 }
 
+// GetSessionCount returns the number of active sessions.
+func (h *HioloadWS) GetSessionCount() int {
+	count := 0
+	h.sessionMgr.Range(func(s session.Session) {
+		count++
+	})
+	return count
+}
+
 func (h *HioloadWS) GetStats() map[string]any {
 	stats := h.control.Stats()
 	bs := h.bufferPool.Stats()
@@ -208,5 +217,6 @@ func (h *HioloadWS) GetStats() map[string]any {
 	tf := h.transport.Features()
 	stats["transport.zero_copy"] = tf.ZeroCopy
 	stats["executor.num_workers"] = h.executor.NumWorkers()
+	stats["active_sessions"] = h.GetSessionCount()
 	return stats
 }

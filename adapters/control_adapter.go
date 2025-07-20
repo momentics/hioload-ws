@@ -1,3 +1,4 @@
+// File: adapters/control_adapter.go
 // Package adapters
 // Author: momentics <momentics@gmail.com>
 //
@@ -49,9 +50,8 @@ func (c *ControlAdapter) OnReload(fn func()) {
 	c.config.OnReload(fn)
 	control.RegisterReloadHook(fn)
 }
-func (c *ControlAdapter) SetMetric(key string, value any) {
-	c.metrics.Set(key, value)
-}
+
+// RegisterDebugProbe registers a named debug probe for introspection.
 func (c *ControlAdapter) RegisterDebugProbe(name string, fn func() any) {
 	c.debug.RegisterProbe(name, fn)
 }

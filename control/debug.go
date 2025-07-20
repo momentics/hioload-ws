@@ -1,4 +1,5 @@
-// control/debug.go
+// File: control/debug.go
+// Package control
 // Author: momentics <momentics@gmail.com>
 //
 // Runtime debug handler and probe reflector for internal inspection.
@@ -31,7 +32,7 @@ func (dp *DebugProbes) RegisterProbe(name string, fn func() any) {
 func (dp *DebugProbes) DumpState() map[string]any {
 	dp.mu.RLock()
 	defer dp.mu.RUnlock()
-	out := make(map[string]any)
+	out := make(map[string]any, len(dp.probes))
 	for k, fn := range dp.probes {
 		out[k] = fn()
 	}

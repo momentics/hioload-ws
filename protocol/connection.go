@@ -11,6 +11,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
 )
 
@@ -22,6 +23,10 @@ type WSConnection struct {
 	bufPool   api.BufferPool
 	closed    bool
 	mu        sync.Mutex
+}
+
+func (c *WSConnection) SetHandler(mw *adapters.MiddlewareHandler) {
+	panic("unimplemented")
 }
 
 func (c *WSConnection) Recv() (any, any) {

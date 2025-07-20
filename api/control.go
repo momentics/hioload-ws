@@ -1,11 +1,12 @@
+// File: api/control.go
 // Package api
 // Author: momentics
 //
-// Runtime configuration, statistics, and dynamic reload contract for highload systems.
+// Runtime configuration, statistics, dynamic reload and debug contract for highload systems.
 
 package api
 
-// Control exposes configuration and live metrics API for runtime systems.
+// Control exposes configuration, live metrics and debug API.
 type Control interface {
     // GetConfig returns a snapshot of all configuration settings.
     GetConfig() map[string]any
@@ -18,4 +19,8 @@ type Control interface {
 
     // OnReload registers a callback for hot-reload/config updates.
     OnReload(fn func())
+
+    // RegisterDebugProbe dynamically registers a named debug probe function.
+    // The probe is invoked during debug dumps and health checks.
+    RegisterDebugProbe(name string, fn func() any)
 }
