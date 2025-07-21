@@ -9,6 +9,11 @@
 
 ---
 
+| ![hioload-ws sponsors](image.png) | **Dear sponsors!** <br><br>We are looking for partners to provide a high-end testing environment in Moscow for hioload-ws — a WebSocket library delivering microsecond-level end-to-end latency under extreme loads.<br>If your infrastructure can host millions of simultaneous connections and supports advanced p99 latency analytics — get in touch to collaborate!<br><br>**Contact:** momentics@gmail.com |
+| :-- | :-- |
+
+---
+
 ## Overview
 
 `hioload-ws` is a cross-platform, production-grade, extensible skeleton for building ultra-performing WebSocket and custom network servers in Go. The project fuses best-in-class approaches from DPDK-like data plane architectures—zero-copy, NUMA-awareness, affinity, batch-processing, lock-free data structures—with scalable event-driven design. It is crafted for maximum throughput, lowest possible latency, and industrial integrity when serving millions of concurrent connections on modern Linux or Windows servers.
