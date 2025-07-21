@@ -33,6 +33,7 @@ type Config struct {
 	SessionShards int
 	EnableMetrics bool
 	EnableDebug   bool
+	CPUAffinity   bool
 }
 
 // DefaultConfig returns default configuration.
@@ -50,18 +51,20 @@ func DefaultConfig() *Config {
 		SessionShards: 16,
 		EnableMetrics: true,
 		EnableDebug:   true,
+		CPUAffinity:   true,
 	}
 }
 
 // HioloadWS is the main facade type.
 type HioloadWS struct {
-	transport  api.Transport
-	bufferPool api.BufferPool
-	poller     api.Poller
-	affinity   api.Affinity
-	control    api.Control
-	executor   *concurrency.Executor
-	sessionMgr session.SessionManager
+	transport     api.Transport
+	bufferPool    api.BufferPool
+	bufferPoolMgr *pool.BufferPoolManager
+	poller        api.Poller
+	affinity      api.Affinity
+	control       api.Control
+	executor      *concurrency.Executor
+	sessionMgr    session.SessionManager
 
 	config  *Config
 	mu      sync.RWMutex
@@ -79,9 +82,9 @@ func New(cfg *Config) (*HioloadWS, error) {
 	h.control = adapters.NewControlAdapter()
 	h.affinity = adapters.NewAffinityAdapter()
 
-	// Buffer pool
-	poolMgr := pool.NewBufferPoolManager()
-	h.bufferPool = poolMgr.GetPool(cfg.NUMANode)
+	// Buffer pool manager and default pool
+	h.bufferPoolMgr = pool.NewBufferPoolManager()
+	h.bufferPool = h.bufferPoolMgr.GetPool(cfg.NUMANode)
 
 	// Transport
 	var tr api.Transport
@@ -125,9 +128,9 @@ func (h *HioloadWS) Start() error {
 	if h.started {
 		return nil
 	}
-	if h.config.NUMANode >= 0 {
+	if h.config.CPUAffinity && h.config.NUMANode >= 0 {
 		if err := h.affinity.Pin(h.config.NUMANode, -1); err != nil {
-			return err
+			log.Printf("[facade] CPU affinity warning: %v", err)
 		}
 	}
 	if h.config.EnableMetrics {
@@ -157,6 +160,20 @@ func (h *HioloadWS) GetControl() api.Control {
 	return h.control
 }
 
+// GetBuffer returns a buffer from the buffer pool (FIXED: method was missing).
+func (h *HioloadWS) GetBuffer(size int, numaNode int) api.Buffer {
+	if numaNode < 0 {
+		numaNode = h.config.NUMANode
+	}
+	pool := h.bufferPoolMgr.GetPool(numaNode)
+	return pool.Get(size, numaNode)
+}
+
+// GetTransport returns the underlying transport (FIXED: method was missing).
+func (h *HioloadWS) GetTransport() api.Transport {
+	return h.transport
+}
+
 // RegisterHandler registers a Handler with the internal Poller.
 func (h *HioloadWS) RegisterHandler(handler api.Handler) error {
 	return h.poller.Register(handler)
@@ -174,4 +191,18 @@ func (h *HioloadWS) GetSessionCount() int {
 // CreateWebSocketConnection constructs a new WSConnection.
 func (h *HioloadWS) CreateWebSocketConnection() *protocol.WSConnection {
 	return protocol.NewWSConnection(h.transport, h.bufferPool, h.config.ChannelSize)
+}
+
+// Submit submits a task to the executor.
+func (h *HioloadWS) Submit(task func()) error {
+	return h.executor.Submit(task)
+}
+
+// GetConfig returns current configuration.
+func (h *HioloadWS) GetConfig() *Config {
+	return h.config
+}
+
+func (h *HioloadWS) GetBufferPool() api.BufferPool {
+    return h.bufferPool
 }
