@@ -42,7 +42,6 @@ func NewEventLoop(batchSize, queueSize int) *EventLoop {
 	if batchSize <= 0 {
 		batchSize = 16
 	}
-	// Round queueSize up to next power of two
 	size := nextPowerOfTwo(uint32(queueSize))
 	loop := &EventLoop{
 		queue:     NewRingBuffer[Event](uint64(size)),
@@ -54,19 +53,9 @@ func NewEventLoop(batchSize, queueSize int) *EventLoop {
 	return loop
 }
 
-// nextPowerOfTwo returns the smallest power of two >= v.
-func nextPowerOfTwo(v uint32) uint32 {
-	if v == 0 {
-		return 1
-	}
-	v--
-	v |= v >> 1
-	v |= v >> 2
-	v |= v >> 4
-	v |= v >> 8
-	v |= v >> 16
-	v++
-	return v
+// Pending returns the number of events currently in the queue.
+func (el *EventLoop) Pending() int {
+	return el.queue.Len()
 }
 
 func (el *EventLoop) RegisterHandler(h EventHandler) {
@@ -166,10 +155,16 @@ func (el *EventLoop) Stop() {
 	}
 }
 
-func (el *EventLoop) Pending() int {
-	return el.queue.Len()
-}
-
-func (el *EventLoop) IsRunning() bool {
-	return atomic.LoadInt32(&el.running) == 1
+func nextPowerOfTwo(v uint32) uint32 {
+	if v == 0 {
+		return 1
+	}
+	v--
+	v |= v >> 1
+	v |= v >> 2
+	v |= v >> 4
+	v |= v >> 8
+	v |= v >> 16
+	v++
+	return v
 }

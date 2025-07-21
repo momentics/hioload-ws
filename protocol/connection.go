@@ -24,14 +24,14 @@ type WSConnection struct {
 
 	mu      sync.RWMutex
 	handler api.Handler
-	closed  int32  // atomic: 1 if closed
+	closed  int32 // atomic: 1 if closed
 	done    chan struct{}
-	
+
 	// Statistics
-	bytesReceived int64
-	bytesSent     int64
+	bytesReceived  int64
+	bytesSent      int64
 	framesReceived int64
-	framesSent    int64
+	framesSent     int64
 }
 
 // NewWSConnection constructs WSConnection with given channel capacity.
@@ -107,7 +107,7 @@ func (c *WSConnection) Close() error {
 
 	// Close channels to signal shutdown
 	close(c.done)
-	
+
 	// Close transport
 	if err := c.transport.Close(); err != nil {
 		// Log error but don't fail the close operation
@@ -130,7 +130,7 @@ func (c *WSConnection) GetStats() map[string]int64 {
 // recvLoop reads from transport, decodes frames, and dispatches.
 func (c *WSConnection) recvLoop() {
 	defer c.Close()
-	
+
 	for atomic.LoadInt32(&c.closed) == 0 {
 		raws, err := c.transport.Recv()
 		if err != nil {
@@ -165,12 +165,12 @@ func (c *WSConnection) recvLoop() {
 			c.mu.RLock()
 			h := c.handler
 			c.mu.RUnlock()
-			
+
 			if h != nil {
 				// Create buffer from frame payload
 				buf := c.bufPool.Get(int(frame.PayloadLen), 0)
 				copy(buf.Bytes(), frame.Payload)
-				
+
 				// Handle in background to avoid blocking recv loop
 				go func(buffer api.Buffer) {
 					defer buffer.Release()
@@ -186,7 +186,12 @@ func (c *WSConnection) sendLoop() {
 	for {
 		select {
 		case frame := <-c.outbox:
-			data := EncodeFrameToBytes(frame)
+			data, err := EncodeFrameToBytes(frame)
+			if err != nil {
+				// Send error - close connection
+				c.Close()
+				return
+			}
 			if err := c.transport.Send([][]byte{data}); err != nil {
 				// Send error - close connection
 				c.Close()

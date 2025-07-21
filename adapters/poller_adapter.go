@@ -1,6 +1,9 @@
+// File: adapters/poller_adapter.go
 // Package adapters
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
+//
+// PollerAdapter wraps EventLoop for batched event processing.
 
 package adapters
 
@@ -11,15 +14,15 @@ import (
 	"github.com/momentics/hioload-ws/internal/concurrency"
 )
 
-// PollerAdapter uses integral BatchSize and RingCapacity.
+// PollerAdapter uses EventLoop for batched event processing.
 type PollerAdapter struct {
 	eventLoop *concurrency.EventLoop
 	handlers  []api.Handler
-	mu        sync.RWMutex
-	running   bool
+	mu        sync.Mutex
+	started   bool
 }
 
-// NewPollerAdapter creates adapter with explicit parameters.
+// NewPollerAdapter creates adapter with given parameters.
 func NewPollerAdapter(batchSize, ringCapacity int) api.Poller {
 	return &PollerAdapter{
 		eventLoop: concurrency.NewEventLoop(batchSize, ringCapacity),
@@ -38,10 +41,9 @@ func (hb *handlerBridge) HandleEvent(ev concurrency.Event) {
 func (p *PollerAdapter) Register(h api.Handler) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	if !p.running {
+	if !p.started {
 		go p.eventLoop.Run()
-		p.running = true
+		p.started = true
 	}
 	hb := &handlerBridge{inner: h}
 	p.eventLoop.RegisterHandler(hb)
@@ -50,17 +52,16 @@ func (p *PollerAdapter) Register(h api.Handler) error {
 }
 
 func (p *PollerAdapter) Poll(maxEvents int) (int, error) {
-	return p.eventLoop.Pending(), nil
+	// events are pushed via handlers; report pending count
+	count := p.eventLoop.Pending()
+	return count, nil
 }
 
 func (p *PollerAdapter) Unregister(h api.Handler) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	// No internal removal, event loop handles stale handlers.
+	// Unregistration not supported to avoid contention.
 	return nil
 }
 
-// Stop gracefully stops the event loop.
 func (p *PollerAdapter) Stop() {
 	p.eventLoop.Stop()
 }
