@@ -19,12 +19,13 @@ type TaskFunc func()
 
 // Executor manages a pool of worker goroutines.
 type Executor struct {
-	globalQueue chan TaskFunc
-	localQueues []*lockFreeQueue[TaskFunc]
-	workers     []*worker
-	closeCh     chan struct{}
-	closed      atomic.Bool
-	mu          sync.Mutex
+	globalQueue   chan TaskFunc
+	localQueues   []*lockFreeQueue[TaskFunc]
+	workers       []*worker
+	closeCh       chan struct{}
+	closed        atomic.Bool
+	resizeRequest chan int
+	mu            sync.Mutex
 }
 
 // NewExecutor creates a new Executor with the given number of workers.
@@ -33,8 +34,9 @@ func NewExecutor(numWorkers, numaNode int) *Executor {
 		numWorkers = runtime.NumCPU()
 	}
 	e := &Executor{
-		globalQueue: make(chan TaskFunc, numWorkers*4),
-		closeCh:     make(chan struct{}),
+		globalQueue:   make(chan TaskFunc, numWorkers*4),
+		closeCh:       make(chan struct{}),
+		resizeRequest: make(chan int),
 	}
 	e.localQueues = make([]*lockFreeQueue[TaskFunc], numWorkers)
 	e.workers = make([]*worker, numWorkers)
@@ -46,6 +48,7 @@ func NewExecutor(numWorkers, numaNode int) *Executor {
 		e.workers[i] = w
 		go w.run(numaNode)
 	}
+	go e.manageResizes(numaNode)
 	return e
 }
 
@@ -69,10 +72,46 @@ func (e *Executor) Submit(task TaskFunc) error {
 	}
 }
 
+// Resize dynamically scales the worker pool.
+func (e *Executor) Resize(newCount int) {
+	e.resizeRequest <- newCount
+}
+
+// manageResizes handles resize requests.
+func (e *Executor) manageResizes(numaNode int) {
+	for newCount := range e.resizeRequest {
+		e.mu.Lock()
+		// clamp
+		if newCount <= 0 {
+			newCount = 1
+		}
+		current := len(e.workers)
+		if newCount > current {
+			// add workers
+			for i := current; i < newCount; i++ {
+				q := NewLockFreeQueue[TaskFunc](1024)
+				e.localQueues = append(e.localQueues, q)
+				w := &worker{id: i, executor: e, localQueue: q, stopCh: make(chan struct{})}
+				e.workers = append(e.workers, w)
+				go w.run(numaNode)
+			}
+		} else if newCount < current {
+			// stop extra workers
+			for i := newCount; i < current; i++ {
+				close(e.workers[i].stopCh)
+			}
+			e.workers = e.workers[:newCount]
+			e.localQueues = e.localQueues[:newCount]
+		}
+		e.mu.Unlock()
+	}
+}
+
 // Close shuts down the executor.
 func (e *Executor) Close() {
 	if e.closed.CompareAndSwap(false, true) {
 		close(e.closeCh)
+		close(e.resizeRequest)
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		for _, w := range e.workers {

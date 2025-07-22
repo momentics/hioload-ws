@@ -1,10 +1,9 @@
 // File: examples/echo/main.go
 // Package main
-// Author: momentics <momentics@gmail.com>
-// License: Apache-2.0
-//
 // Native WebSocket Echo server using hioload-ws without HTTP dependency.
-// This demonstrates true zero-copy, NUMA-aware, high-performance WebSocket handling.
+// Demonstrates true zero-copy, NUMA-aware, high-performance WebSocket handling.
+// This version uses sensible defaults from facade.DefaultConfig() and allows
+// overriding only the address via flag. English comments explain key parts.
 
 package main
 
@@ -15,6 +14,7 @@ import (
 	"os/signal"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/facade"
@@ -23,67 +23,57 @@ import (
 )
 
 func main() {
-	// CLI flags
-	addr := flag.String("addr", ":8080", "WebSocket listen address")
-	useDPDK := flag.Bool("dpdk", false, "enable DPDK transport")
-	shards := flag.Int("shards", 16, "number of session shards")
-	workers := flag.Int("workers", 4, "number of executor workers")
-	batchSize := flag.Int("batch", 16, "poller batch size")
-	ringCap := flag.Int("ring", 1024, "poller ring capacity")
-	numaNode := flag.Int("numa", -1, "preferred NUMA node")
+	// Allow overriding only the listen address; other parameters come from defaults.
+	addr := flag.String("addr", "", "WebSocket listen address (default from config)")
 	flag.Parse()
 
-	// Build facade configuration
+	// Build facade configuration with defaults.
 	cfg := facade.DefaultConfig()
-	cfg.ListenAddr = *addr
-	cfg.UseDPDK = *useDPDK
-	cfg.SessionShards = *shards
-	cfg.NumWorkers = *workers
-	cfg.BatchSize = *batchSize
-	cfg.RingCapacity = *ringCap
-	cfg.NUMANode = *numaNode
-
-	// Create HioloadWS facade
+	if *addr != "" {
+		cfg.ListenAddr = *addr
+	}
+	// Initialize facade.
 	hioload, err := facade.New(cfg)
 	if err != nil {
 		log.Fatalf("failed to create HioloadWS: %v", err)
 	}
+	if err := hioload.Start(); err != nil {
+		log.Fatalf("failed to start HioloadWS: %v", err)
+	}
+	defer hioload.Stop()
 
-	// Register debug probe for active connections
+	// Register debug probe for active connections.
 	var connectionCount int32
 	hioload.GetControl().RegisterDebugProbe("active_connections", func() any {
 		return atomic.LoadInt32(&connectionCount)
 	})
 
-	// Start core services
-	if err := hioload.Start(); err != nil {
-		log.Fatalf("failed to start HioloadWS: %v", err)
-	}
-	log.Printf("Echo server starting on %s (DPDK=%v, NUMA=%d)",
-		cfg.ListenAddr, cfg.UseDPDK, cfg.NUMANode)
+	log.Printf("Echo server starting on %s", cfg.ListenAddr)
 
-	// Get buffer pool and channel size for WS listener
+	// Setup native WebSocket listener.
 	bufPool := hioload.GetBufferPool()
-	listener, err := transport.NewWebSocketListener(*addr, bufPool, cfg.ChannelSize)
+	listener, err := transport.NewWebSocketListener(cfg.ListenAddr, bufPool, cfg.ChannelSize)
 	if err != nil {
-		log.Fatalf("failed to create WebSocket listener: %v", err)
+		log.Fatalf("failed to create listener: %v", err)
 	}
 	defer listener.Close()
 
-	log.Printf("Native WebSocket server listening on %s", *addr)
+	// Scheduler for heartbeat and shutdown timers.
+	scheduler := hioload.GetScheduler()
+	cfgMap := hioload.GetControl().GetConfig()
+	hbInterval := cfgMap["heartbeat_interval"].(int64)
+	shutdownTimeout := cfgMap["shutdown_timeout"].(int64)
 
-	// Connection handler loop
 	go func() {
 		for {
 			wsConn, err := listener.Accept()
 			if err != nil {
-				log.Printf("failed to accept WebSocket connection: %v", err)
+				log.Printf("accept error: %v", err)
 				continue
 			}
-
 			atomic.AddInt32(&connectionCount, 1)
 
-			// Echo logic via handler
+			// Echo handler.
 			echoHandler := adapters.HandlerFunc(func(data any) error {
 				switch d := data.(type) {
 				case []byte:
@@ -93,47 +83,53 @@ func main() {
 						PayloadLen: int64(len(d)),
 						Payload:    d,
 					})
-				case string:
-					b := []byte(d)
-					return wsConn.Send(&protocol.WSFrame{
-						IsFinal:    true,
-						Opcode:     protocol.OpcodeText,
-						PayloadLen: int64(len(b)),
-						Payload:    b,
-					})
 				}
 				return nil
 			})
-
-			// Middleware wrapping
-			middleware := adapters.NewMiddlewareHandler(echoHandler).
+			mw := adapters.NewMiddlewareHandler(echoHandler).
 				Use(adapters.LoggingMiddleware).
 				Use(adapters.RecoveryMiddleware).
 				Use(adapters.MetricsMiddleware(hioload.GetControl()))
+			wsConn.SetHandler(mw)
+			wsConn.Start()
 
-			wsConn.SetHandler(middleware)
+			// Heartbeat based on configured interval.
+			scheduler.Schedule(hbInterval, func() {
+				wsConn.Send(&protocol.WSFrame{
+					IsFinal:    true,
+					Opcode:     protocol.OpcodePing,
+					PayloadLen: 0,
+				})
+			})
 
-			// Launch handler goroutine
-			go func(conn *protocol.WSConnection) {
-				defer func() {
-					atomic.AddInt32(&connectionCount, -1)
-					conn.Close()
-				}()
-				conn.Start()
-				<-conn.Done()
-			}(wsConn)
+			// Decrement count on close.
+			go func() {
+				<-wsConn.Done()
+				atomic.AddInt32(&connectionCount, -1)
+			}()
 		}
 	}()
 
-	// Shutdown on signal
+	// Handle shutdown signal.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
+	log.Println("Shutdown signal received, initiating graceful shutdown")
 
-	log.Println("Shutting down native WebSocket echo server...")
+	// Schedule force exit after configured timeout.
+	shutdownDone := make(chan struct{})
+	scheduler.Schedule(shutdownTimeout, func() {
+		log.Println("Graceful shutdown timed out, forcing exit")
+		close(shutdownDone)
+	})
+
 	listener.Close()
-	if err := hioload.Stop(); err != nil {
-		log.Printf("error stopping HioloadWS: %v", err)
+
+	// Wait for either all connections to close or timeout.
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Duration(shutdownTimeout)):
 	}
-	log.Println("Server stopped gracefully.")
+
+	log.Println("Server exited")
 }
