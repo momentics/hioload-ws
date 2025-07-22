@@ -56,6 +56,13 @@
 - **Обширная документация**
   Все исходники детально описаны на английском, включая архитектуру модулей и тюнинг.
 
+## Производительность
+
+2×Intel Xeon Gold 6248R (24C, 48T, 3.0GHz), 256ГБ DDR4, 2×1.92ТБ NVMe, 2×100GbE, NUMA, Gentoo Linux 6.12 / Windows Server 2019 Datacenter
+
+![hioload performance troughtput](perf-troughtput.png)
+![hioload latency](perf-latency-desribution.png)
+![hioload latency deviation](perf-latency-deviation.png)
 ---
 
 ## Оглавление

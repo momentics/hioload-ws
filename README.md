@@ -12,6 +12,14 @@
 | ![hioload-ws sponsors](image.png) | **Dear sponsors!** <br><br>We are looking for partners to provide a high-end testing environment in Moscow for hioload-ws — a WebSocket library delivering microsecond-level end-to-end latency under extreme loads.<br>If your infrastructure can host millions of simultaneous connections and supports advanced p99 latency analytics — get in touch to collaborate!<br><br>**Contact:** momentics@gmail.com |
 | :-- | :-- |
 
+## Performance
+
+2×Intel Xeon Gold 6248R (24C, 48T, 3.0GHz), 256ГБ DDR4, 2×1.92ТБ NVMe, 2×100GbE, NUMA, Gentoo Linux 6.12 / Windows Server 2019 Datacenter
+
+![hioload performance troughtput](perf-troughtput.png)
+![hioload latency](perf-latency-desribution.png)
+![hioload latency deviation](perf-latency-deviation.png)
+
 ---
 
 ## Overview
