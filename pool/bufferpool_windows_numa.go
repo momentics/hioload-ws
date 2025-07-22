@@ -1,11 +1,12 @@
-// File: pool/bufferpool_windows_numa.go
 //go:build windows
 // +build windows
 
-//
-// Helper for NUMA memory allocation via VirtualAllocExNuma.
+// File: pool/bufferpool_windows_numa.go
+// Package pool provides Windows NUMA allocation helper.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
+//
+// virtualAllocExNuma wraps Windows VirtualAllocExNuma for explicit NUMA control.
 
 package pool
 
@@ -13,9 +14,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// VirtualAllocExNuma wrapper
+// virtualAllocExNuma allocates memory on a specified NUMA node.
+// Returns pointer or error.
 func virtualAllocExNuma(process windows.Handle, size int, node uint32) (uintptr, error) {
-	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("VirtualAllocExNuma")
+	proc := windows.NewLazySystemDLL("kernel32.dll").
+		NewProc("VirtualAllocExNuma")
 	addr, _, err := proc.Call(
 		uintptr(process),
 		0,

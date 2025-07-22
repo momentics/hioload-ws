@@ -81,8 +81,6 @@ func (lt *linuxTransport) Send(buffers [][]byte) error {
 			end = total
 		}
 		bufs := buffers[sent:end]
-		// SendmsgBuffers signature: (fd int, bufs [][]byte, oob []byte, to unix.Sockaddr, flags int)
-		// Use nil for oob and nil for to (connected socket), flags 0
 		n, err := unix.SendmsgBuffers(lt.fd, bufs, nil, nil, 0)
 		if err != nil {
 			return fmt.Errorf("SendmsgBuffers: %w", err)
@@ -106,9 +104,10 @@ func (lt *linuxTransport) Close() error {
 }
 
 func (lt *linuxTransport) Features() api.TransportFeatures {
+	// Indicate NUMA-awareness for Linux transport
 	return api.TransportFeatures{
 		ZeroCopy:  true,
 		Batch:     true,
-		NUMAAware: false,
+		NUMAAware: true,
 	}
 }

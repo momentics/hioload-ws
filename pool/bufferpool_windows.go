@@ -2,11 +2,12 @@
 // +build windows
 
 // File: pool/bufferpool_windows.go
-// Package pool
+// Package pool provides Windows-specific NUMA-aware buffer pool.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// Платформенно-специфичная реализация windowsBufferPool.
+// windowsBuffer uses VirtualAllocExNuma for large pages on Windows.
+// newBufferPool returns a baseBufferPool configured for windowsBuffer.
 
 package pool
 
@@ -17,26 +18,41 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var (
-	procVirtualAllocExNuma = windows.NewLazySystemDLL("kernel32.dll").NewProc("VirtualAllocExNuma")
-)
+var procVirtualAllocExNuma = windows.
+	NewLazySystemDLL("kernel32.dll").
+	NewProc("VirtualAllocExNuma")
 
+// windowsBuffer implements api.Buffer for Windows large-page allocations.
 type windowsBuffer struct {
 	data   []byte
 	pool   *baseBufferPool[*windowsBuffer]
 	numaID int
 }
 
+// Bytes returns the underlying byte slice.
 func (b *windowsBuffer) Bytes() []byte { return b.data }
+
+// Slice returns a sub-buffer referencing the same data.
 func (b *windowsBuffer) Slice(from, to int) api.Buffer {
 	return &windowsBuffer{data: b.data[from:to], pool: b.pool, numaID: b.numaID}
 }
-func (b *windowsBuffer) Release()      { b.pool.recycle(b) }
-func (b *windowsBuffer) Copy() []byte  { c := make([]byte, len(b.data)); copy(c, b.data); return c }
+
+// Release returns this buffer to its pool.
+func (b *windowsBuffer) Release() { b.pool.recycle(b) }
+
+// Copy makes a fresh copy of the data.
+func (b *windowsBuffer) Copy() []byte {
+	c := make([]byte, len(b.data))
+	copy(c, b.data)
+	return c
+}
+
+// NUMANode reports the NUMA node.
 func (b *windowsBuffer) NUMANode() int { return b.numaID }
 
-func newWindowsBuffer(size, numaPref int) *windowsBuffer {
-	node := uint32(numaPref)
+// newWindowsBuffer allocates via VirtualAllocExNuma or falls back.
+func newWindowsBuffer(size, numaNode int) *windowsBuffer {
+	node := uint32(numaNode)
 	addr, _, err := procVirtualAllocExNuma.Call(
 		uintptr(windows.CurrentProcess()), 0,
 		uintptr(size),
@@ -44,17 +60,20 @@ func newWindowsBuffer(size, numaPref int) *windowsBuffer {
 		uintptr(windows.PAGE_READWRITE),
 		uintptr(node),
 	)
+	var data []byte
 	if addr == 0 || err != nil {
-		return &windowsBuffer{data: make([]byte, size), numaID: numaPref}
+		data = make([]byte, size)
+	} else {
+		data = unsafe.Slice((*byte)(unsafe.Pointer(addr)), size)
 	}
-	data := unsafe.Slice((*byte)(unsafe.Pointer(addr)), size)
-	return &windowsBuffer{data: data, numaID: numaPref}
+	return &windowsBuffer{data: data, numaID: numaNode}
 }
 
+// newBufferPool constructs the Windows buffer pool via baseBufferPool.
 func newBufferPool(numaNode int) api.BufferPool {
 	var base *baseBufferPool[*windowsBuffer]
-	factory := func(size, numaPref int) *windowsBuffer {
-		buf := newWindowsBuffer(size, numaPref)
+	factory := func(size, pref int) *windowsBuffer {
+		buf := newWindowsBuffer(size, pref)
 		buf.pool = base
 		return buf
 	}
