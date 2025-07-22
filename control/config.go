@@ -11,8 +11,8 @@ import (
 
 // ConfigStore is a dynamic key/value map with atomic snapshot and listener support.
 type ConfigStore struct {
-	mu       sync.RWMutex
-	config   map[string]any
+	mu        sync.RWMutex
+	config    map[string]any
 	listeners []func()
 }
 

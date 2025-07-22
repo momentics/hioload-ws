@@ -10,6 +10,7 @@ type TransportFeatures struct {
 	ZeroCopy  bool
 	Batch     bool
 	NUMAAware bool
+	TLS       bool
 	OS        []string
 }
 

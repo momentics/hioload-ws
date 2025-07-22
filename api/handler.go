@@ -7,5 +7,5 @@ package api
 
 // Handler processes data payloads.
 type Handler interface {
-    Handle(data any) error
+	Handle(data any) error
 }

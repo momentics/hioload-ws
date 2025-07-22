@@ -7,18 +7,18 @@ package api
 
 // Result wraps any value or error for composable/async calls.
 type Result[T any] struct {
-    Value T
-    Err   error
+	Value T
+	Err   error
 }
 
 // Cancelable defines contract for cancelable async operations.
 type Cancelable interface {
-    // Cancel aborts the operation if still pending.
-    Cancel() error
+	// Cancel aborts the operation if still pending.
+	Cancel() error
 
-    // Done returns a channel closed when operation completes or is canceled.
-    Done() <-chan struct{}
+	// Done returns a channel closed when operation completes or is canceled.
+	Done() <-chan struct{}
 
-    // Err returns cancellation or completion reason.
-    Err() error
+	// Err returns cancellation or completion reason.
+	Err() error
 }

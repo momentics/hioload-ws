@@ -1,8 +1,9 @@
 // File: pool/bufferpool.go
+// Package pool
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
 // Cross-platform NUMA-aware BufferPool manager with transparent backend selection.
-// All public API is OS/NUMA-agnostic; platform-specific allocators in separate files.
 
 package pool
 
@@ -15,18 +16,15 @@ import (
 // BufferPoolManager provides NUMA-segmented pools for each NUMA node.
 type BufferPoolManager struct {
 	mu    sync.RWMutex
-	pools map[int]api.BufferPool // Key: NUMA node (-1 for system default)
+	pools map[int]api.BufferPool // Key: NUMA node (-1 for default)
 }
 
-// NewBufferPoolManager creates and initializes a new manager.
 func NewBufferPoolManager() *BufferPoolManager {
 	return &BufferPoolManager{
 		pools: make(map[int]api.BufferPool),
 	}
 }
 
-// GetPool obtains or creates a NUMA-specific BufferPool.
-// NUMA node -1 means "system default"; other values refer to platform-specific ID.
 func (m *BufferPoolManager) GetPool(numaNode int) api.BufferPool {
 	m.mu.RLock()
 	pool, ok := m.pools[numaNode]
@@ -44,4 +42,4 @@ func (m *BufferPoolManager) GetPool(numaNode int) api.BufferPool {
 	return pool
 }
 
-// Platform-specific implementations of newBufferPool reside in bufferpool_linux.go and bufferpool_windows.go.
+// newBufferPool реализована в файлах bufferpool_linux.go и bufferpool_windows.go

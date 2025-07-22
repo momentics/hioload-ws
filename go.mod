@@ -6,5 +6,5 @@ toolchain go1.23.6
 
 require (
 	golang.org/x/sys v0.34.0
-
 )
+

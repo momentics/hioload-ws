@@ -34,6 +34,7 @@ func (c *ControlAdapter) SetConfig(cfg map[string]any) error {
 	c.config.SetConfig(cfg)
 	return nil
 }
+
 func (c *ControlAdapter) Stats() map[string]any {
 	stats := c.metrics.GetSnapshot()
 	debugStats := c.debug.DumpState()

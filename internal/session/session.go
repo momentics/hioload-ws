@@ -1,6 +1,7 @@
 // File: internal/session/session.go
 // Package session
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
 // Core session implementation with cancellation, deadline, and context.
 
@@ -13,23 +14,23 @@ import (
 	"github.com/momentics/hioload-ws/api"
 )
 
-// Ensure compile-time API compliance if api.Session exists:
-// var _ api.Session = (*sessionImpl)(nil)
-
 // sessionImpl holds per-connection state, context, and cancellation.
 type sessionImpl struct {
 	id       string
-	ctx      *contextStore
+	ctx      api.Context
 	done     chan struct{}
 	once     sync.Once
 	deadline time.Time
 }
 
+// Ensure compile-time API compliance if api.Session exists:
+// var _ api.Session = (*sessionImpl)(nil)
+
 // newSession creates a new session with the given unique identifier.
 func newSession(id string) *sessionImpl {
 	return &sessionImpl{
 		id:   id,
-		ctx:  newContextStore(),
+		ctx:  NewContextStore(),
 		done: make(chan struct{}),
 	}
 }

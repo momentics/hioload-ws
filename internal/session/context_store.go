@@ -1,6 +1,7 @@
 // File: internal/session/context_store.go
 // Package session
 // Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 //
 // Thread-safe, propagation-aware context store implementing api.Context.
 
@@ -13,6 +14,7 @@ import (
 	"github.com/momentics/hioload-ws/api"
 )
 
+// entry holds value, propagation flag и expiry timestamp.
 type entry struct {
 	value      any
 	propagated bool
@@ -28,11 +30,9 @@ type contextStore struct {
 // Ensure compile-time API compliance.
 var _ api.Context = (*contextStore)(nil)
 
-// newContextStore creates an empty contextStore.
-func newContextStore() *contextStore {
-	return &contextStore{
-		store: make(map[string]entry),
-	}
+// NewContextStore создаёт новый internal/session.contextStore.
+func NewContextStore() *contextStore {
+	return &contextStore{store: make(map[string]entry)}
 }
 
 // Set assigns a value under key, marking it for propagation if requested.

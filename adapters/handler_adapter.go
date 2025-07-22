@@ -1,4 +1,5 @@
-// adapters/handler_adapter.go
+// File: adapters/handler_adapter.go
+// Package adapters
 // Author: momentics <momentics@gmail.com>
 //
 // HandlerFunc glue and extensible middleware with chain-of-type tracing.
@@ -11,17 +12,21 @@ import (
 	"github.com/momentics/hioload-ws/api"
 )
 
+// HandlerFunc converts a function into an api.Handler.
 type HandlerFunc func(data any) error
 
+// Handle calls the underlying function.
 func (f HandlerFunc) Handle(data any) error {
 	return f(data)
 }
 
+// MiddlewareHandler wraps a base Handler and applies middleware in chain.
 type MiddlewareHandler struct {
 	handler    api.Handler
 	middleware []func(api.Handler) api.Handler
 }
 
+// NewMiddlewareHandler creates a new MiddlewareHandler for the given base handler.
 func NewMiddlewareHandler(handler api.Handler) *MiddlewareHandler {
 	return &MiddlewareHandler{
 		handler:    handler,
@@ -29,11 +34,13 @@ func NewMiddlewareHandler(handler api.Handler) *MiddlewareHandler {
 	}
 }
 
+// Use appends a middleware to the chain.
 func (m *MiddlewareHandler) Use(mw func(api.Handler) api.Handler) *MiddlewareHandler {
 	m.middleware = append(m.middleware, mw)
 	return m
 }
 
+// Handle applies all middleware then calls the base handler.
 func (m *MiddlewareHandler) Handle(data any) error {
 	handler := m.handler
 	for i := len(m.middleware) - 1; i >= 0; i-- {
@@ -42,6 +49,7 @@ func (m *MiddlewareHandler) Handle(data any) error {
 	return handler.Handle(data)
 }
 
+// LoggingMiddleware logs entry, exit, and errors of handler invocation.
 func LoggingMiddleware(next api.Handler) api.Handler {
 	return HandlerFunc(func(data any) error {
 		log.Printf("[Handler] Processing data: %T", data)
@@ -53,6 +61,7 @@ func LoggingMiddleware(next api.Handler) api.Handler {
 	})
 }
 
+// RecoveryMiddleware recovers from panics in handler.
 func RecoveryMiddleware(next api.Handler) api.Handler {
 	return HandlerFunc(func(data any) error {
 		defer func() {
@@ -64,6 +73,7 @@ func RecoveryMiddleware(next api.Handler) api.Handler {
 	})
 }
 
+// MetricsMiddleware increments the "handler.processed" counter in Control stats.
 func MetricsMiddleware(control api.Control) func(api.Handler) api.Handler {
 	return func(next api.Handler) api.Handler {
 		return HandlerFunc(func(data any) error {
