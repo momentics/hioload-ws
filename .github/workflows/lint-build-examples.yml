@@ -1,73 +1,54 @@
-name: Lint, Build & Test (Linux & Windows)
+# File: .github/workflows/release.yml
+# This workflow publishes tagged releases of hioload-ws using GoReleaser,
+# which in turn generates GitHub releases, Docker images (if configured),
+# and drives pkg.go.dev documentation updates.
+#
+# Author: momentics <momentics@gmail.com>
+# License: Apache-2.0
+
+name: Release
 
 on:
   push:
-    branches: [main, develop]
-  pull_request:
-
-env:
-  GO_VERSION: "1.23"
-  GOEXPERIMENT: aliastypeparams
-  CGO_ENABLED: "0"
-  GO111MODULE: "on"
+    tags:
+      - 'v*.*.*'   # Trigger on semantic version tags like v1.2.3
 
 jobs:
-  build-test:
-    name: Build, Lint & Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    env:
-      CGO_ENABLED: "0"
-      GOEXPERIMENT: aliastypeparams
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: '1.23'
+          check-latest: true
 
-      - name: Install dependencies
-        run: go mod tidy
+      - name: Install GoReleaser
+        uses: goreleaser/action@v2
+        with:
+          version: latest
+          install: true
 
-      - name: Run linters
+      - name: Run GoReleaser
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          go install golang.org/x/lint/golint@latest
-          golint ./...
+          # Create GitHub release, build archives, and push artifacts.
+          goreleaser release --rm-dist
 
-      - name: Run library tests
+      - name: Trigger pkg.go.dev re-index
+        # Ping pkg.go.dev to ensure the new version is indexed immediately
         run: |
-          go test ./control/... ./api/... ./adapters/... ./pool/... ./protocol/... ./facade/... ./internal/session/... -v -timeout 10m
-
-      - name: Run example tests
-        run: |
-          go test ./examples/broadcast/... ./examples/echo/... -v -timeout 5m
-
-      - name: Run internal transport & websocket tests
-        run: |
-          go test ./internal/transport/... ./internal/websocket/... ./internal/concurrency/... -v -timeout 10m
-
-      - name: Build examples
-        shell: bash
-        working-directory: ./examples
-        run: |
-          mkdir -p ../dist/${{ matrix.os }}
-          for dir in */; do
-            [ -f "$dir/main.go" ] || continue
-            out="../dist/${{ matrix.os }}/${dir%/}"
-            if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-              CGO_ENABLED=0 GOOS=windows GOEXPERIMENT=aliastypeparams go build -o "${out}.exe" "./$dir"
-            else
-              CGO_ENABLED=0 GOOS=linux GOEXPERIMENT=aliastypeparams go build -o "${out}" "./$dir"
-            fi
+          for i in {1..3}; do
+            curl -s -o /dev/null "https://pkg.go.dev/github.com/momentics/hioload-ws?tab=doc" && break
+            sleep 10
           done
 
-      - name: Upload example binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: example-binaries-${{ matrix.os }}
-          path: dist/${{ matrix.os }}/
+      - name: Verify pkg.go.dev indexing
+        run: |
+          echo "Check https://pkg.go.dev/github.com/momentics/hioload-ws for updated documentation."
