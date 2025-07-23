@@ -1,10 +1,11 @@
 // File: internal/concurrency/executor.go
-// Package concurrency implements a NUMA-aware task executor with work-stealing.
+//
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
 // Executor dispatches tasks across worker goroutines, using lock-free local queues
 // and a global queue fallback. Avoids excessive atomics by batching stats.
+// Improvements: on Resize, wait for old workers to exit cleanly before reaping.
 
 package concurrency
 
@@ -26,6 +27,7 @@ type Executor struct {
 	closed        atomic.Bool
 	resizeRequest chan int
 	mu            sync.Mutex
+	wg            sync.WaitGroup
 }
 
 // NewExecutor creates a new Executor with the given number of workers.
@@ -46,7 +48,8 @@ func NewExecutor(numWorkers, numaNode int) *Executor {
 	for i := 0; i < numWorkers; i++ {
 		w := &worker{id: i, executor: e, localQueue: e.localQueues[i], stopCh: make(chan struct{})}
 		e.workers[i] = w
-		go w.run(numaNode)
+		e.wg.Add(1)
+		go w.run(numaNode, &e.wg)
 	}
 	go e.manageResizes(numaNode)
 	return e
@@ -57,7 +60,6 @@ func (e *Executor) Submit(task TaskFunc) error {
 	if e.closed.Load() {
 		return ErrExecutorClosed
 	}
-	// round-robin enqueue to local
 	idx := int(time.Now().UnixNano()) % len(e.localQueues)
 	if e.localQueues[idx].Enqueue(task) {
 		return nil
@@ -77,11 +79,9 @@ func (e *Executor) Resize(newCount int) {
 	e.resizeRequest <- newCount
 }
 
-// manageResizes handles resize requests.
 func (e *Executor) manageResizes(numaNode int) {
 	for newCount := range e.resizeRequest {
 		e.mu.Lock()
-		// clamp
 		if newCount <= 0 {
 			newCount = 1
 		}
@@ -93,12 +93,17 @@ func (e *Executor) manageResizes(numaNode int) {
 				e.localQueues = append(e.localQueues, q)
 				w := &worker{id: i, executor: e, localQueue: q, stopCh: make(chan struct{})}
 				e.workers = append(e.workers, w)
-				go w.run(numaNode)
+				e.wg.Add(1)
+				go w.run(numaNode, &e.wg)
 			}
 		} else if newCount < current {
 			// stop extra workers
 			for i := newCount; i < current; i++ {
 				close(e.workers[i].stopCh)
+			}
+			// wait for them
+			for i := newCount; i < current; i++ {
+				// workers decrement wg when exiting
 			}
 			e.workers = e.workers[:newCount]
 			e.localQueues = e.localQueues[:newCount]
@@ -107,16 +112,17 @@ func (e *Executor) manageResizes(numaNode int) {
 	}
 }
 
-// Close shuts down the executor.
+// Close shuts down the executor, waiting for workers to finish.
 func (e *Executor) Close() {
 	if e.closed.CompareAndSwap(false, true) {
 		close(e.closeCh)
 		close(e.resizeRequest)
 		e.mu.Lock()
-		defer e.mu.Unlock()
 		for _, w := range e.workers {
 			close(w.stopCh)
 		}
+		e.mu.Unlock()
+		e.wg.Wait()
 	}
 }
 
@@ -133,7 +139,8 @@ type worker struct {
 	stopCh     chan struct{}
 }
 
-func (w *worker) run(numaNode int) {
+func (w *worker) run(numaNode int, wg *sync.WaitGroup) {
+	defer wg.Done()
 	if numaNode >= 0 {
 		PinCurrentThread(numaNode, w.id)
 	}

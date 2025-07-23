@@ -82,7 +82,7 @@ func (r *BroadcastRegistry) Broadcast(sender *protocol.WSConnection, data []byte
 			Payload:    buf.Bytes(),
 		}
 
-		if err := client.Send(frame); err != nil {
+		if err := client.SendFrame(frame); err != nil {
 			log.Printf("[broadcast] Failed to send to %s: %v", clientID, err)
 		} else {
 			sent++

@@ -76,7 +76,7 @@ func main() {
 				if !ok {
 					return nil
 				}
-				return wsConn.Send(&protocol.WSFrame{
+				return wsConn.SendFrame(&protocol.WSFrame{
 					IsFinal:    true,
 					Opcode:     protocol.OpcodeBinary,
 					PayloadLen: int64(len(buf)),

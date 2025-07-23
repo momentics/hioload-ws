@@ -1,10 +1,6 @@
 // File: internal/concurrency/eventloop.go
 // Package concurrency implements a high-performance event loop with adaptive backoff.
-// Author: momentics <momentics@gmail.com>
-// License: Apache-2.0
-//
-// EventLoop processes events in batches without locks on the hot path.
-// Handlers are decoupled via atomic.Value, supporting dynamic registration.
+// Improvements: unregister all handlers on Stop to avoid dead handlers retention.
 
 package concurrency
 
@@ -14,17 +10,14 @@ import (
 	"time"
 )
 
-// Event represents a generic event with arbitrary payload.
 type Event struct {
 	Data interface{}
 }
 
-// EventHandler processes individual events.
 type EventHandler interface {
 	HandleEvent(ev Event)
 }
 
-// EventLoop is a batched poll-mode loop with exponential backoff.
 type EventLoop struct {
 	queue     *RingBuffer[Event]
 	handlers  atomic.Value // []EventHandler
@@ -36,8 +29,6 @@ type EventLoop struct {
 }
 
 // NewEventLoop creates a new EventLoop.
-// batchSize: max events per cycle.
-// queueSize: ring buffer capacity; will be rounded up to next power of two.
 func NewEventLoop(batchSize, queueSize int) *EventLoop {
 	if batchSize <= 0 {
 		batchSize = 16
@@ -53,7 +44,6 @@ func NewEventLoop(batchSize, queueSize int) *EventLoop {
 	return loop
 }
 
-// Pending returns the number of events currently in the queue.
 func (el *EventLoop) Pending() int {
 	return el.queue.Len()
 }
@@ -61,8 +51,8 @@ func (el *EventLoop) Pending() int {
 func (el *EventLoop) RegisterHandler(h EventHandler) {
 	for {
 		old := el.handlers.Load().([]EventHandler)
-		new := append(old, h)
-		if el.handlers.CompareAndSwap(old, new) {
+		newSlice := append(old, h)
+		if el.handlers.CompareAndSwap(old, newSlice) {
 			return
 		}
 	}
@@ -71,13 +61,13 @@ func (el *EventLoop) RegisterHandler(h EventHandler) {
 func (el *EventLoop) UnregisterHandler(h EventHandler) {
 	for {
 		old := el.handlers.Load().([]EventHandler)
-		var new []EventHandler
+		var newSlice []EventHandler
 		for _, hh := range old {
 			if hh != h {
-				new = append(new, hh)
+				newSlice = append(newSlice, hh)
 			}
 		}
-		if el.handlers.CompareAndSwap(old, new) {
+		if el.handlers.CompareAndSwap(old, newSlice) {
 			return
 		}
 	}
@@ -91,7 +81,11 @@ func (el *EventLoop) Run() {
 	if !atomic.CompareAndSwapInt32(&el.running, 0, 1) {
 		return
 	}
-	defer atomic.StoreInt32(&el.stopped, 1)
+	defer func() {
+		atomic.StoreInt32(&el.stopped, 1)
+		// clear handlers on stop
+		el.handlers.Store([]EventHandler{})
+	}()
 	batch := make([]Event, el.batchSize)
 	for {
 		select {
@@ -104,6 +98,15 @@ func (el *EventLoop) Run() {
 			} else {
 				atomic.StoreInt64(&el.backoffNs, 1)
 			}
+		}
+	}
+}
+
+func (el *EventLoop) Stop() {
+	if atomic.LoadInt32(&el.running) == 1 {
+		close(el.stopCh)
+		for atomic.LoadInt32(&el.stopped) == 0 {
+			time.Sleep(time.Microsecond)
 		}
 	}
 }
@@ -144,15 +147,6 @@ func (el *EventLoop) adaptiveBackoff() {
 		next = 1_000_000
 	}
 	atomic.StoreInt64(&el.backoffNs, next)
-}
-
-func (el *EventLoop) Stop() {
-	if atomic.LoadInt32(&el.running) == 1 {
-		close(el.stopCh)
-		for atomic.LoadInt32(&el.stopped) == 0 {
-			time.Sleep(time.Microsecond)
-		}
-	}
 }
 
 func nextPowerOfTwo(v uint32) uint32 {
