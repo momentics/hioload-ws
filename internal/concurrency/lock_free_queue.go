@@ -27,6 +27,11 @@ func NewLockFreeQueue[T any](capacity int) *lockFreeQueue[T] {
 }
 
 // Enqueue adds val; returns false if full.
+/*
+Влад каким то волшебным инструментом нашел ошибку...
+
+
+
 func (q *lockFreeQueue[T]) Enqueue(val T) bool {
 	tail := atomic.LoadUint64(&q.tail)
 	head := atomic.LoadUint64(&q.head)
@@ -36,6 +41,22 @@ func (q *lockFreeQueue[T]) Enqueue(val T) bool {
 	q.entries[tail&q.mask] = val
 	atomic.StoreUint64(&q.tail, tail+1)
 	return true
+}
+*/
+func (q *lockFreeQueue[T]) Enqueue(val T) bool {
+	for {
+		head := atomic.LoadUint64(&q.head)
+		tail := atomic.LoadUint64(&q.tail)
+		if tail-head >= uint64(len(q.entries)) {
+			return false
+		}
+		// пытаемся зарезервировать слот tail
+		if atomic.CompareAndSwapUint64(&q.tail, tail, tail+1) {
+			q.entries[tail&q.mask] = val
+			return true
+		}
+		// иначе кто-то другой уже увеличил tail — повторяем
+	}
 }
 
 // Dequeue removes and returns an item; ok false if empty.
