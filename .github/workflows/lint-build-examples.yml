@@ -1,0 +1,70 @@
+name: Lint & Build Examples (Linux & Windows)
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+env:
+  GO_VERSION: "1.23"
+  GOEXPERIMENT: aliastypeparams
+
+jobs:
+  lint:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v5
+        with:
+          version: v1.59
+          args: --timeout 5m
+        env:
+          GOEXPERIMENT: ${{ env.GOEXPERIMENT }}
+
+  build-examples:
+    name: Build Examples
+    runs-on: ${{ matrix.os }}
+    needs: lint
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      GOEXPERIMENT: aliastypeparams
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build all examples
+        working-directory: ./examples
+        run: |
+          mkdir -p ../../dist/examples/${{ matrix.os }}
+          for dir in */; do
+            if [ -f "$dir/main.go" ]; then
+              echo "Building example: $dir on ${{ matrix.os }}"
+              if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+                GOOS=windows GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
+              else
+                GOOS=linux GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
+              fi
+            fi
+          done
+
+      - name: Upload example binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: example-binaries-${{ matrix.os }}
+          path: dist/examples/${{ matrix.os }}/
