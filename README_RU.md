@@ -2,6 +2,8 @@
 
 **Высокопроизводительная, NUMA-aware, Zero-Copy каркасная библиотека WebSocket для Golang**
 
+[![Build Examples (Linux & Windows)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml/badge.svg?branch=main)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml)
+
 ---
 
 **Автор:** momentics <momentics@gmail.com>  

@@ -2,6 +2,8 @@
 
 **Ultra-High-Performance NUMA-Aware Zero-Copy WebSocket Library for Go**
 
+[![Build Examples (Linux & Windows)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml/badge.svg?branch=main)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml)
+
 ---
 
 **Author:** momentics <momentics@gmail.com>  
