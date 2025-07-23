@@ -3,10 +3,12 @@
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// Unified facade layer for the hioload-ws library, orchestrating transport,
-// buffer pooling, session management, executors, pollers, schedulers, and
-// control interfaces. Exposes a simple API to start/stop the system, create
-// WebSocket connections with timeouts, and access runtime services.
+// HioloadWS facade – orchestrates the core subsystems of the hioload-ws framework,
+// providing a simple, composable API for maximal throughput and reliability
+// in NUMA-aware, batch-IO, lock-free, and hot-reloadable WebSocket deployments.
+//
+// This version includes UnregisterHandler, GetContextFactory, GetDebugAPI, and
+// RegisterReloadHook in accordance with modern extensibility requirements.
 
 package facade
 
@@ -25,29 +27,28 @@ import (
 	"github.com/momentics/hioload-ws/protocol"
 )
 
-// Config holds immutable parameters for system initialization. These fields
-// determine buffer sizes, batch sizes, transport selection, NUMA preferences,
-// and default timeouts for reads and writes.
+// Config exposes all configurable system parameters
+// for optimal control in production setups.
 type Config struct {
-	IOBufferSize      int           // Size of transport I/O buffers
-	ChannelSize       int           // Capacity of WebSocket recv/send channels
-	RingCapacity      int           // Capacity of event-loop ring buffers
-	BatchSize         int           // Batch size for poller processing
-	UseDPDK           bool          // Whether to initialize DPDK transport
-	ListenAddr        string        // TCP listen address for WebSocket listener
-	NumWorkers        int           // Number of executor worker goroutines
-	NUMANode          int           // Preferred NUMA node for buffers and workers
-	ReadTimeout       time.Duration // Default read deadline for WebSocket connections
-	WriteTimeout      time.Duration // Default write deadline for WebSocket connections
-	EnableMetrics     bool          // Toggle runtime metrics collection
-	EnableDebug       bool          // Toggle debug probe registration
-	CPUAffinity       bool          // Pin threads to NUMA/Cores if true
-	HeartbeatInterval time.Duration // Interval for internal heartbeats (unused)
-	ShutdownTimeout   time.Duration // Timeout for graceful shutdown (unused)
+	IOBufferSize      int
+	ChannelSize       int
+	RingCapacity      int
+	BatchSize         int
+	UseDPDK           bool
+	ListenAddr        string
+	NumWorkers        int
+	NUMANode          int
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	EnableMetrics     bool
+	EnableDebug       bool
+	CPUAffinity       bool
+	HeartbeatInterval time.Duration
+	ShutdownTimeout   time.Duration
 }
 
-// DefaultConfig returns a Config populated with sane defaults suitable for
-// most deployment scenarios.
+// DefaultConfig provides a baseline configuration for most use cases.
+// You can modify returned fields before passing to New.
 func DefaultConfig() *Config {
 	return &Config{
 		IOBufferSize:      64 * 1024,
@@ -68,42 +69,52 @@ func DefaultConfig() *Config {
 	}
 }
 
-// HioloadWS is the central facade type, fulfilling api.GracefulShutdown.
+// HioloadWS is the main facade struct, providing access to all core
+// infrastructure: transport, pooling, event loop, executor, debugging, etc.
+// All relevant control methods for handler lifecycle, context, and debug
+// are provided as explicit top-level methods for maximum discoverability.
 type HioloadWS struct {
-	transport  api.Transport
-	bufferPool api.BufferPool
-	poller     api.Poller
-	executor   *concurrency.Executor
-	scheduler  api.Scheduler
-	control    api.Control
-	affinity   api.Affinity
-	sessionMgr session.SessionManager
+	transport      api.Transport
+	bufferPool     api.BufferPool
+	poller         api.Poller
+	executor       *concurrency.Executor
+	scheduler      api.Scheduler
+	control        api.Control
+	affinity       api.Affinity
+	sessionMgr     session.SessionManager
+	contextFactory api.ContextFactory // Explicitly expose context factory
+	debugAPI       api.Debug          // Explicitly expose debug probe API
 
 	config  *Config
 	mu      sync.RWMutex
 	started bool
 }
 
-// New constructs the facade, initializing subsystems based on Config.
-// It sets up transport, buffer pools, session manager, executor, poller,
-// scheduler, affinity, and control. Exposes key parameters via Control API.
+// New creates and initializes a new HioloadWS facade instance.
+// All construction details are encapsulated for one-call setup.
 func New(cfg *Config) (*HioloadWS, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
 	h := &HioloadWS{config: cfg}
 
-	// Initialize control for dynamic config, metrics, and debug
+	// Control interface: config, metrics, live debug probes, hot reload hooks.
 	h.control = adapters.NewControlAdapter()
 
-	// Initialize affinity for CPU/NUMA pinning
-	h.affinity = adapters.NewAffinityAdapter()
+	// Attempt to extract the debug probe API from control, if available.
+	if debugGetter, ok := h.control.(interface{ GetDebug() api.Debug }); ok {
+		h.debugAPI = debugGetter.GetDebug()
+	}
 
-	// Setup buffer pools per NUMA node
+	// ContextFactory allows for per-request or per-session key-value context.
+	h.contextFactory = adapters.NewContextAdapter()
+	// Affinity (NUMA/CPU pinning) for minimizing inter-node memory latency.
+	h.affinity = adapters.NewAffinityAdapter()
+	// NUMA-aware buffer pool for high-throughput and cache coherence.
 	mgr := pool.NewBufferPoolManager()
 	h.bufferPool = mgr.GetPool(cfg.NUMANode)
 
-	// Initialize transport: DPDK or native fallback
+	// Create appropriate transport: DPDK if requested, else platform default.
 	var tr api.Transport
 	var err error
 	if cfg.UseDPDK {
@@ -120,13 +131,16 @@ func New(cfg *Config) (*HioloadWS, error) {
 	}
 	h.transport = tr
 
-	// Initialize session manager, executor, poller, scheduler
+	// High-concurrency session manager (sharded by hash).
 	h.sessionMgr = session.NewSessionManager(16)
+	// Executor: work-stealing, NUMA-aware thread pool for all background processing.
 	h.executor = concurrency.NewExecutor(cfg.NumWorkers, cfg.NUMANode)
+	// Batched event-poller (reactor).
 	h.poller = adapters.NewPollerAdapter(cfg.BatchSize, cfg.RingCapacity)
+	// High-res scheduler for timeouts, heartbeats, etc.
 	h.scheduler = concurrency.NewScheduler()
 
-	// Publish initial config values into the Control store
+	// Initial config pushed into control registry for live metrics/debug.
 	h.control.SetConfig(map[string]any{
 		"listen_addr": cfg.ListenAddr,
 		"transport_type": func() string {
@@ -142,21 +156,19 @@ func New(cfg *Config) (*HioloadWS, error) {
 	return h, nil
 }
 
-// Start applies CPU affinity if configured, enables metrics, and marks the
-// facade as started. Subsequent calls are no-ops.
+// Start applies any NUMA or CPU pinning,
+// enables metrics collection (if configured), and marks service as started.
 func (h *HioloadWS) Start() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.started {
 		return nil
 	}
-	// Pin to NUMA node if requested
 	if h.config.CPUAffinity && h.config.NUMANode >= 0 {
 		if err := h.affinity.Pin(h.config.NUMANode, -1); err != nil {
 			log.Printf("Affinity pin warning: %v", err)
 		}
 	}
-	// Enable metrics flag
 	if h.config.EnableMetrics {
 		h.control.SetConfig(map[string]any{"metrics.enabled": true})
 	}
@@ -164,8 +176,7 @@ func (h *HioloadWS) Start() error {
 	return nil
 }
 
-// Stop gracefully shuts down poller, transport, executor, and unpins affinity.
-// Marks the facade as not started. Safe to call multiple times.
+// Stop cleanly tears down reactors, executor, transport, and releases affinity.
 func (h *HioloadWS) Stop() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -180,43 +191,68 @@ func (h *HioloadWS) Stop() error {
 	return nil
 }
 
-// Shutdown implements api.GracefulShutdown by delegating to Stop.
+// Shutdown ensures all background systems stop gracefully.
 func (h *HioloadWS) Shutdown() error {
 	return h.Stop()
 }
 
-// CreateWebSocketConnection builds a protocol.WSConnection using the facade's
-// transport, buffer pool, and channel sizing, then wraps it for handler usage.
+// CreateWebSocketConnection binds together all per-connection
+// zero-copy and event-driven state required for each WebSocket session.
 func (h *HioloadWS) CreateWebSocketConnection() *protocol.WSConnection {
 	return protocol.NewWSConnection(h.transport, h.bufferPool, h.config.ChannelSize)
 }
 
-// GetControl returns the Control interface for dynamic config and metrics.
+// GetControl exposes the hot reload, dynamic config, metrics, and probe registration interface.
 func (h *HioloadWS) GetControl() api.Control {
 	return h.control
 }
 
-// GetBufferPool returns the NUMA-aware BufferPool for zero-copy operations.
+// GetBufferPool exposes the NUMA-aware BufferPool
+// for direct zero-copy buffer management by advanced consumers.
 func (h *HioloadWS) GetBufferPool() api.BufferPool {
 	return h.bufferPool
 }
 
-// Submit enqueues a task for asynchronous execution in the executor pool.
-func (h *HioloadWS) Submit(task func()) error {
-	return h.executor.Submit(task)
+// GetContextFactory grants access to the underlying context factory used in the system.
+// This is critical for integrating custom context propagation or request/session-scoped data.
+func (h *HioloadWS) GetContextFactory() api.ContextFactory {
+	return h.contextFactory
 }
 
-// RegisterHandler registers an api.Handler with the internal poller for event dispatch.
+// GetDebugAPI provides direct access to the Debug interface,
+// allowing for dynamic probe registration and live introspection.
+// This is crucial for exposing runtime health and diagnostics in production.
+func (h *HioloadWS) GetDebugAPI() api.Debug {
+	return h.debugAPI
+}
+
+// RegisterHandler adds or replaces a message handler in the event loop.
 func (h *HioloadWS) RegisterHandler(handler api.Handler) error {
 	return h.poller.Register(handler)
 }
 
-// GetScheduler exposes the Scheduler for timed callbacks and heartbeats.
+// UnregisterHandler removes an existing handler from the poller for dynamic endpoint switching.
+func (h *HioloadWS) UnregisterHandler(handler api.Handler) error {
+	return h.poller.Unregister(handler)
+}
+
+// RegisterReloadHook registers a callback to be invoked when config is hot-reloaded
+// via Control.SetConfig. Enables dynamic adaptation, state reset, or metric flush.
+func (h *HioloadWS) RegisterReloadHook(fn func()) {
+	h.control.OnReload(fn)
+}
+
+// Submit dispatches a task to the executor for parallel background processing.
+func (h *HioloadWS) Submit(task func()) error {
+	return h.executor.Submit(task)
+}
+
+// GetScheduler exposes the system-wide scheduler for deferred tasks and timeouts.
 func (h *HioloadWS) GetScheduler() api.Scheduler {
 	return h.scheduler
 }
 
-// GetSessionCount returns the current number of active sessions across all shards.
+// GetSessionCount returns the current global count of alive sessions for observability.
 func (h *HioloadWS) GetSessionCount() int {
 	count := 0
 	h.sessionMgr.Range(func(_ session.Session) {

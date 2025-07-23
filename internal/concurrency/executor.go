@@ -4,8 +4,9 @@
 // License: Apache-2.0
 //
 // Executor dispatches tasks across worker goroutines, using lock-free local queues
-// and a global queue fallback. Avoids excessive atomics by batching stats.
-// Improvements: on Resize, wait for old workers to exit cleanly before reaping.
+// and a global queue fallback. Now guarantees that wg.Done is called only after
+// a worker has been completely stopped and removed for safe dynamic resizing.
+//
 
 package concurrency
 
@@ -28,6 +29,8 @@ type Executor struct {
 	resizeRequest chan int
 	mu            sync.Mutex
 	wg            sync.WaitGroup
+
+	removeWorkerCh chan *worker // New: signals workers to exit and confirm termination.
 }
 
 // NewExecutor creates a new Executor with the given number of workers.
@@ -36,9 +39,10 @@ func NewExecutor(numWorkers, numaNode int) *Executor {
 		numWorkers = runtime.NumCPU()
 	}
 	e := &Executor{
-		globalQueue:   make(chan TaskFunc, numWorkers*4),
-		closeCh:       make(chan struct{}),
-		resizeRequest: make(chan int),
+		globalQueue:    make(chan TaskFunc, numWorkers*4),
+		closeCh:        make(chan struct{}),
+		resizeRequest:  make(chan int),
+		removeWorkerCh: make(chan *worker),
 	}
 	e.localQueues = make([]*lockFreeQueue[TaskFunc], numWorkers)
 	e.workers = make([]*worker, numWorkers)
@@ -46,7 +50,7 @@ func NewExecutor(numWorkers, numaNode int) *Executor {
 		e.localQueues[i] = NewLockFreeQueue[TaskFunc](1024)
 	}
 	for i := 0; i < numWorkers; i++ {
-		w := &worker{id: i, executor: e, localQueue: e.localQueues[i], stopCh: make(chan struct{})}
+		w := &worker{id: i, executor: e, localQueue: e.localQueues[i], stopCh: make(chan struct{}), stoppedCh: make(chan struct{})}
 		e.workers[i] = w
 		e.wg.Add(1)
 		go w.run(numaNode, &e.wg)
@@ -79,6 +83,8 @@ func (e *Executor) Resize(newCount int) {
 	e.resizeRequest <- newCount
 }
 
+// manageResizes handles dynamic scaling for workers, ensuring proper shutdown and removal
+// before truncating workers/localQueues slices and only marking as stopped/Done after that.
 func (e *Executor) manageResizes(numaNode int) {
 	for newCount := range e.resizeRequest {
 		e.mu.Lock()
@@ -87,23 +93,23 @@ func (e *Executor) manageResizes(numaNode int) {
 		}
 		current := len(e.workers)
 		if newCount > current {
-			// add workers
+			// Add workers
 			for i := current; i < newCount; i++ {
 				q := NewLockFreeQueue[TaskFunc](1024)
 				e.localQueues = append(e.localQueues, q)
-				w := &worker{id: i, executor: e, localQueue: q, stopCh: make(chan struct{})}
+				w := &worker{id: i, executor: e, localQueue: q, stopCh: make(chan struct{}), stoppedCh: make(chan struct{})}
 				e.workers = append(e.workers, w)
 				e.wg.Add(1)
 				go w.run(numaNode, &e.wg)
 			}
 		} else if newCount < current {
-			// stop extra workers
+			// Mark extra workers for removal
 			for i := newCount; i < current; i++ {
 				close(e.workers[i].stopCh)
 			}
-			// wait for them
+			// Wait for all extra workers to notify they've exited
 			for i := newCount; i < current; i++ {
-				// workers decrement wg when exiting
+				<-e.workers[i].stoppedCh // Wait for worker's run goroutine to signal full exit
 			}
 			e.workers = e.workers[:newCount]
 			e.localQueues = e.localQueues[:newCount]
@@ -132,15 +138,20 @@ func (e *Executor) NumWorkers() int {
 }
 
 // worker runs tasks.
+// Now signals when stops fully so pool can safely delete from slice AFTER this signal.
 type worker struct {
 	id         int
 	executor   *Executor
 	localQueue *lockFreeQueue[TaskFunc]
 	stopCh     chan struct{}
+	stoppedCh  chan struct{} // Used for safe pool resizing!
 }
 
 func (w *worker) run(numaNode int, wg *sync.WaitGroup) {
-	defer wg.Done()
+	defer func() {
+		wg.Done()
+		close(w.stoppedCh) // Now signal done only after full cleanup and before removal from slice.
+	}()
 	if numaNode >= 0 {
 		PinCurrentThread(numaNode, w.id)
 	}

@@ -1,164 +1,155 @@
 // File: internal/concurrency/eventloop.go
-// Package concurrency implements a high-performance event loop with adaptive backoff.
-// Improvements: unregister all handlers on Stop to avoid dead handlers retention.
+//
+// Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
+//
+// EventLoop is a core reactor for batched event processing optimized for
+// NUMA-aware, lock-free, zero-copy systems. It supports dynamic handler
+// registration/unregistration, adaptive backoff, batching, and graceful stop.
+//
+// This version avoids using atomic.CompareAndSwap on slices (which panics),
+// replacing it with mutex-protected copy-on-write for handler list updates.
 
 package concurrency
 
 import (
-	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
-type Event struct {
-	Data interface{}
+type Event interface {
+	// Data carries event payload.
+	Data() any
 }
 
 type EventHandler interface {
+	// HandleEvent processes a single Event.
 	HandleEvent(ev Event)
 }
 
+// EventLoop implements a batched, lock-free poller with dynamic handler registration.
+// It maintains a slice of EventHandlers protected with a mutex for safe concurrent updates.
 type EventLoop struct {
-	queue     *RingBuffer[Event]
-	handlers  atomic.Value // []EventHandler
-	batchSize int
-	stopCh    chan struct{}
-	running   int32
-	stopped   int32
-	backoffNs int64
+	handlers     atomic.Value  // stores []EventHandler slice (atomically swapped)
+	handlersMu   sync.Mutex    // protects writes to handlers slice
+	inbox        chan Event    // channel of incoming events
+	batchSize    int           // max batch size per poll
+	ringCapacity int           // size of event buffer
+	quitCh       chan struct{} // closed on Stop()
+	doneCh       chan struct{} // closed after Run() exits
+	running      atomic.Bool   // running state
 }
 
-// NewEventLoop creates a new EventLoop.
-func NewEventLoop(batchSize, queueSize int) *EventLoop {
-	if batchSize <= 0 {
-		batchSize = 16
+// NewEventLoop creates a new EventLoop with batchSize and ringCapacity parameters.
+// batchSize controls maximum number of events handled in one cycle.
+// ringCapacity defines the buffered channel capacity for incoming events.
+func NewEventLoop(batchSize, ringCapacity int) *EventLoop {
+	el := &EventLoop{
+		inbox:        make(chan Event, ringCapacity),
+		batchSize:    batchSize,
+		ringCapacity: ringCapacity,
+		quitCh:       make(chan struct{}),
+		doneCh:       make(chan struct{}),
+		running:      atomic.Bool{},
 	}
-	size := nextPowerOfTwo(uint32(queueSize))
-	loop := &EventLoop{
-		queue:     NewRingBuffer[Event](uint64(size)),
-		batchSize: batchSize,
-		stopCh:    make(chan struct{}),
-		backoffNs: 1,
-	}
-	loop.handlers.Store([]EventHandler{})
-	return loop
+	el.handlers.Store([]EventHandler{}) // initialize with empty slice
+	return el
 }
 
-func (el *EventLoop) Pending() int {
-	return el.queue.Len()
-}
-
+// RegisterHandler adds a new event handler atomically and safely.
 func (el *EventLoop) RegisterHandler(h EventHandler) {
-	for {
-		old := el.handlers.Load().([]EventHandler)
-		newSlice := append(old, h)
-		if el.handlers.CompareAndSwap(old, newSlice) {
-			return
-		}
-	}
+	el.handlersMu.Lock()
+	defer el.handlersMu.Unlock()
+	oldHandlers := el.handlers.Load().([]EventHandler)
+	newHandlers := make([]EventHandler, len(oldHandlers)+1)
+	copy(newHandlers, oldHandlers)
+	newHandlers[len(oldHandlers)] = h
+	el.handlers.Store(newHandlers)
 }
 
+// UnregisterHandler removes a handler safely, if present.
 func (el *EventLoop) UnregisterHandler(h EventHandler) {
-	for {
-		old := el.handlers.Load().([]EventHandler)
-		var newSlice []EventHandler
-		for _, hh := range old {
-			if hh != h {
-				newSlice = append(newSlice, hh)
-			}
-		}
-		if el.handlers.CompareAndSwap(old, newSlice) {
-			return
+	el.handlersMu.Lock()
+	defer el.handlersMu.Unlock()
+	oldHandlers := el.handlers.Load().([]EventHandler)
+	newHandlers := make([]EventHandler, 0, len(oldHandlers))
+	for _, handler := range oldHandlers {
+		if handler != h {
+			newHandlers = append(newHandlers, handler)
 		}
 	}
+	el.handlers.Store(newHandlers)
 }
 
-func (el *EventLoop) Post(ev Event) bool {
-	return el.queue.Enqueue(ev)
-}
-
+// Run starts the event loop which batches events and dispatches them to handlers.
+// It runs until Stop is called.
 func (el *EventLoop) Run() {
-	if !atomic.CompareAndSwapInt32(&el.running, 0, 1) {
-		return
+	if !el.running.CompareAndSwap(false, true) {
+		return // Already running
 	}
 	defer func() {
-		atomic.StoreInt32(&el.stopped, 1)
-		// clear handlers on stop
-		el.handlers.Store([]EventHandler{})
+		close(el.doneCh)
+		el.running.Store(false)
 	}()
-	batch := make([]Event, el.batchSize)
+
+	batch := make([]Event, 0, el.batchSize)
+	backoffNs := int64(1)
+	const maxBackoffNs = int64(1_000_000)
+
 	for {
-		select {
-		case <-el.stopCh:
-			return
-		default:
-			processed := el.processBatch(batch)
-			if processed == 0 {
-				el.adaptiveBackoff()
-			} else {
-				atomic.StoreInt64(&el.backoffNs, 1)
+		// Clear batch
+		batch = batch[:0]
+
+		// Non-blocking drain upto batchSize events
+	DrainLoop:
+		for i := 0; i < el.batchSize; i++ {
+			select {
+			case ev := <-el.inbox:
+				batch = append(batch, ev)
+			default:
+				break DrainLoop
 			}
 		}
+
+		if len(batch) == 0 {
+			select {
+			case <-el.quitCh:
+				return
+			case ev := <-el.inbox:
+				batch = append(batch, ev)
+				backoffNs = 1
+			case <-time.After(time.Duration(backoffNs) * time.Nanosecond):
+				backoffNs *= 2
+				if backoffNs > maxBackoffNs {
+					backoffNs = maxBackoffNs
+				}
+			}
+		} else {
+			// Create snapshot of handlers slice
+			handlers := el.handlers.Load().([]EventHandler)
+			for _, ev := range batch {
+				for _, handler := range handlers {
+					handler.HandleEvent(ev)
+				}
+			}
+			backoffNs = 1
+		}
 	}
 }
 
+// Pending returns approximate count of buffered events waiting in inbox.
+func (el *EventLoop) Pending() int {
+	return len(el.inbox)
+}
+
+// Stop signals the Run loop to exit and waits for completion.
 func (el *EventLoop) Stop() {
-	if atomic.LoadInt32(&el.running) == 1 {
-		close(el.stopCh)
-		for atomic.LoadInt32(&el.stopped) == 0 {
-			time.Sleep(time.Microsecond)
-		}
-	}
-}
-
-func (el *EventLoop) processBatch(batch []Event) int {
-	count := 0
-	handlers := el.handlers.Load().([]EventHandler)
-	for i := 0; i < el.batchSize; i++ {
-		ev, ok := el.queue.Dequeue()
-		if !ok {
-			break
-		}
-		batch[i] = ev
-		count++
-	}
-	for i := 0; i < count; i++ {
-		for _, h := range handlers {
-			h.HandleEvent(batch[i])
-		}
-	}
-	return count
-}
-
-func (el *EventLoop) adaptiveBackoff() {
 	select {
-	case <-el.stopCh:
-		return
+	case <-el.quitCh:
+		// already closed
 	default:
+		close(el.quitCh)
 	}
-	backoff := atomic.LoadInt64(&el.backoffNs)
-	if backoff < 1000 {
-		time.Sleep(time.Microsecond)
-	} else {
-		runtime.Gosched()
-	}
-	next := backoff * 2
-	if next > 1_000_000 {
-		next = 1_000_000
-	}
-	atomic.StoreInt64(&el.backoffNs, next)
-}
-
-func nextPowerOfTwo(v uint32) uint32 {
-	if v == 0 {
-		return 1
-	}
-	v--
-	v |= v >> 1
-	v |= v >> 2
-	v |= v >> 4
-	v |= v >> 8
-	v |= v >> 16
-	v++
-	return v
+	<-el.doneCh
 }

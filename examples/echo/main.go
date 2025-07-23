@@ -1,9 +1,9 @@
 // File: examples/echo/main.go
-// Package main
-// Native WebSocket Echo server using hioload-ws without HTTP dependency.
-// Demonstrates true zero-copy, NUMA-aware, high-performance WebSocket handling.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
+//
+// High-throughput WebSocket echo server built on hioload-ws.
+// Demonstrates zero-copy buffer usage, poll-mode event loop, middleware chain, and graceful shutdown.
 
 package main
 
@@ -24,12 +24,15 @@ import (
 )
 
 func main() {
+	// CLI flag to pass WS listen address
 	addr := flag.String("addr", ":9001", "WebSocket listen address")
 	flag.Parse()
 
+	// Build and customize facade config
 	cfg := facade.DefaultConfig()
 	cfg.ListenAddr = *addr
 
+	// Create high-performance WebSocket server facade
 	hioload, err := facade.New(cfg)
 	if err != nil {
 		log.Fatalf("failed to create HioloadWS: %v", err)
@@ -39,14 +42,19 @@ func main() {
 	}
 	defer hioload.Stop()
 
+	// Track number of active connections and register debug probe
 	var connCount int32
 	hioload.GetControl().RegisterDebugProbe("active_connections", func() any {
 		return atomic.LoadInt32(&connCount)
 	})
 
-	log.Printf("Echo server listening on %s", cfg.ListenAddr)
+	log.Printf("[echo] Server listening on %s", cfg.ListenAddr)
 
-	listener, err := transport.NewWebSocketListener(cfg.ListenAddr, hioload.GetBufferPool(), cfg.ChannelSize)
+	// Use updated facade method to get NUMA-aware buffer pool
+	bufPool := hioload.GetBufferPool()
+
+	// Construct zero-copy WebSocket listener on specified address
+	listener, err := transport.NewWebSocketListener(cfg.ListenAddr, bufPool, cfg.ChannelSize)
 	if err != nil {
 		log.Fatalf("failed to create listener: %v", err)
 	}
@@ -54,23 +62,25 @@ func main() {
 
 	acceptDone := make(chan struct{})
 
+	// Launch accept loop to handle new incoming WebSocket connections
 	go func() {
 		defer close(acceptDone)
 		for {
 			wsConn, err := listener.Accept()
 			if err != nil {
 				if errors.Is(err, transport.ErrListenerClosed) {
-					log.Println("Listener closed, exiting accept loop")
+					log.Println("[echo] Listener closed, shutting down connection accept loop")
 					return
 				}
-				log.Printf("accept error: %v", err)
+				log.Printf("[echo] accept error: %v", err)
 				continue
 			}
 
+			// Generate a connection ID and increment connection counter
 			id := fmt.Sprintf("conn-%d", atomic.AddInt32(&connCount, 1))
-			log.Printf("Client connected: %s", id)
+			log.Printf("[echo] Client connected: %s", id)
 
-			// Prepare handler
+			// Echo handler sends back whatever it receives
 			echoHandler := adapters.HandlerFunc(func(data any) error {
 				buf, ok := data.([]byte)
 				if !ok {
@@ -83,29 +93,33 @@ func main() {
 					Payload:    buf,
 				})
 			})
+
+			// Apply middleware chain: logging, panic recovery, metrics
 			mw := adapters.NewMiddlewareHandler(echoHandler).
 				Use(adapters.LoggingMiddleware).
 				Use(adapters.RecoveryMiddleware).
 				Use(adapters.MetricsMiddleware(hioload.GetControl()))
 
+			// Register handler to connection and start processing
 			wsConn.SetHandler(mw)
 			wsConn.Start()
 
+			// Monitor disconnection
 			go func(connID string) {
 				<-wsConn.Done()
-				log.Printf("Client disconnected: %s", connID)
+				log.Printf("[echo] Client disconnected: %s", connID)
 				atomic.AddInt32(&connCount, -1)
 			}(id)
 		}
 	}()
 
+	// Handle SIGINT/SIGTERM for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Println("Shutdown signal received, closing listener")
 
+	log.Println("[echo] Shutdown signal received. Closing listener…")
 	listener.Close()
 	<-acceptDone
-
-	log.Println("Server shutdown complete")
+	log.Println("[echo] Shutdown complete.")
 }

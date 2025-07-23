@@ -73,3 +73,8 @@ func (c *ControlAdapter) OnReload(fn func()) {
 func (c *ControlAdapter) RegisterDebugProbe(name string, fn func() any) {
 	c.debug.RegisterProbe(name, fn)
 }
+
+// File: adapters/control_adapter.go
+func (c *ControlAdapter) GetDebug() api.Debug {
+	return c.debug
+}

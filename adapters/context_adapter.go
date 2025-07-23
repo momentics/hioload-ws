@@ -6,15 +6,15 @@ import (
 	"github.com/momentics/hioload-ws/internal/session"
 )
 
-// ContextAdapter реализует api.ContextFactory, создавая internal/session.contextStore.
+// ContextAdapter implements api.ContextFactory by producing new context stores.
 type ContextAdapter struct{}
 
-// NewContextAdapter возвращает фабрику контекстов.
+// NewContextAdapter returns an instance of the context factory.
 func NewContextAdapter() api.ContextFactory {
 	return &ContextAdapter{}
 }
 
-// NewContext создаёт новый бесплатный contextStore.
+// NewContext returns a new Context (backed by internal/session contextStore).
 func (a *ContextAdapter) NewContext() api.Context {
 	return session.NewContextStore()
 }
