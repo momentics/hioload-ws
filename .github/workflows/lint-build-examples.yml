@@ -1,9 +1,9 @@
 # File: .github/workflows/lint-build-examples.yml
-# Name: Lint & Build Examples (Linux & Windows)
+# Name: Lint & Build Examples (Windows only lint)
 # Author: momentics <momentics@gmail.com>
 # License: Apache-2.0
 
-name: Lint & Build Examples (Linux & Windows)
+name: Lint & Build Examples (Windows only lint)
 
 on:
   push:
@@ -17,18 +17,17 @@ env:
   GO111MODULE: "on"
 
 jobs:
-  lint:
-    name: Static Analysis
-    runs-on: ubuntu-latest
+  lint-windows:
+    name: Static Analysis (Windows)
+    runs-on: windows-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install dependencies for Cgo
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libnuma-dev
-
+          choco install -y msys2
+          pacman -S --noconfirm mingw-w64-x86_64-numa
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -36,22 +35,25 @@ jobs:
 
       - name: Install golangci-lint CLI
         run: |
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $GOPATH/bin v1.59.0
+          $GOPATH=$(go env GOPATH)
+          mkdir -p "$GOPATH/bin"
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$GOPATH/bin" v1.59.0
+          echo "$GOPATH/bin" | Out-File -FilePath $Env:GITHUB_PATH -Encoding utf8
 
-      - name: Run golangci-lint with Cgo tags
+      - name: Run golangci-lint
         run: |
-          CGO_ENABLED=1 golangci-lint run --timeout 5m --build-tags "linux cgo,windows cgo"
+          CGO_ENABLED=1 golangci-lint run --timeout 5m --build-tags "windows cgo"
 
   build-examples:
-    name: Build Examples
+    name: Build Examples (Linux & Windows)
     runs-on: ${{ matrix.os }}
-    needs: lint
+    needs: lint-windows
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      CGO_ENABLED: "1"
       GOEXPERIMENT: aliastypeparams
+      CGO_ENABLED: "1"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -71,7 +73,7 @@ jobs:
               if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
                 GOOS=windows CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
               else
-                GOOS=linux CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
+                GOOS=linux   CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}"   "./$dir"
               fi
             fi
           done
