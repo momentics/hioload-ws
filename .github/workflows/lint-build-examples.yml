@@ -5,6 +5,7 @@
 #
 # This workflow builds all example programs on both Linux and Windows
 # with Go 1.23 (+ GOEXPERIMENT=aliastypeparams and CGO_ENABLED=1).
+# Shell for commands set explicitly to bash for correct execution on Windows.
 
 name: Build Examples (Linux & Windows)
 
@@ -45,6 +46,7 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
 
       - name: Build all examples
+        shell: bash
         working-directory: ./examples
         run: |
           mkdir -p ../../dist/examples/${{ matrix.os }}
@@ -54,7 +56,7 @@ jobs:
               if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
                 CGO_ENABLED=1 GOOS=windows GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
               else
-                CGO_ENABLED=1 GOOS=linux   GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}"   "./$dir"
+                CGO_ENABLED=1 GOOS=linux GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
               fi
             fi
           done
