@@ -1,5 +1,5 @@
 # File: .github/workflows/lint-build-examples.yml
-# Name: Lint & Build Examples (Windows only lint)
+# Name: Lint & Build Examples (Windows-only lint)
 # Author: momentics <momentics@gmail.com>
 # License: Apache-2.0
 
@@ -28,6 +28,7 @@ jobs:
         run: |
           choco install -y msys2
           pacman -S --noconfirm mingw-w64-x86_64-numa
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -35,10 +36,11 @@ jobs:
 
       - name: Install golangci-lint CLI
         run: |
-          $GOPATH=$(go env GOPATH)
+          export GOPATH="$(go env GOPATH)"
           mkdir -p "$GOPATH/bin"
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$GOPATH/bin" v1.59.0
-          echo "$GOPATH/bin" | Out-File -FilePath $Env:GITHUB_PATH -Encoding utf8
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
+            | sh -s -- -b "$GOPATH/bin" v1.59.0
+          echo "$GOPATH/bin" >> $GITHUB_PATH
 
       - name: Run golangci-lint
         run: |
@@ -52,8 +54,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      GOEXPERIMENT: aliastypeparams
       CGO_ENABLED: "1"
+      GOEXPERIMENT: aliastypeparams
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
