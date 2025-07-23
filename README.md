@@ -1,18 +1,26 @@
-# hioload-ws
+# hioload-ws [![Maintenance](https://img.shields.io/maintenance/yes/2025)]()
 
-**Ultra-High-Performance NUMA-Aware Zero-Copy WebSocket Library for Go**
+**Ultra-High-Performance NUMA-aware Zero-Copy Batch-IO, Lock-free Library for Go**
 
-[![Build Examples (Linux & Windows)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml/badge.svg?branch=main)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml)
+[![Build Examples (Linux & Windows)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml/badge.svg?branch=main)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/momentics/hioload-ws)](https://goreportcard.com/report/github.com/momentics/hioload-ws) [![pkg.go.dev](https://pkg.go.dev/badge/github.com/momentics/hioload-ws)](https://pkg.go.dev/github.com/momentics/hioload-ws) [![Release](https://img.shields.io/github/v/release/momentics/hioload-ws)](https://github.com/momentics/hioload-ws/releases) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Dependencies](https://img.shields.io/librariesio/release/github/momentics/hioload-ws)](https://github.com/momentics/hioload-ws/pulls?utf8=%E2%9C%93&q=is%3Apr+label%3Adeps)
 
----
-
-**Author:** momentics <momentics@gmail.com>  
-**License:** Apache 2.0  
-
----
 
 | ![hioload-ws sponsors](image.png) | **Dear sponsors!** <br><br>We are looking for partners to provide a high-end testing environment in Moscow for hioload-ws — a WebSocket library delivering microsecond-level end-to-end latency under extreme loads.<br>If your infrastructure can host millions of simultaneous connections and supports advanced p99 latency analytics — get in touch to collaborate!<br><br>**Contact:** momentics@gmail.com |
 | :-- | :-- |
+
+**Features**  
+- Zero-copy data paths with NUMA-aware buffer pools  
+- Poll-mode I/O (epoll, IOCP, io_uring ready)  
+- Lock-free and wait-free concurrency primitives  
+- Batch processing for maximum throughput  
+- Pluggable transports: TCP, DPDK, io_uring, Windows IOCP  
+- CPU/NUMA affinity and hugepage support for ultra-low latency  
+- Hot-reloadable configuration, runtime metrics, and debug probes  
+
+**Platform Support**  
+- Linux (kernel ≥6.20)  
+- Windows Server (2016+)  
+- Go 1.21+ (1.23 recommended)  
 
 ## Performance
 

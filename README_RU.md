@@ -1,20 +1,35 @@
-# hioload-ws
+# hioload-ws [![Maintenance](https://img.shields.io/maintenance/yes/2025)]()
 
-**Высокопроизводительная, NUMA-aware, Zero-Copy каркасная библиотека WebSocket для Golang**
+**Сверхпроизводительная NUMA-aware Zero-Copy Batch-IO, Lock-free WebSocket библиотека на Go**
 
-[![Build Examples (Linux & Windows)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml/badge.svg?branch=main)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml)
+[![Build Examples (Linux & Windows)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml/badge.svg?branch=main)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/momentics/hioload-ws)](https://goreportcard.com/report/github.com/momentics/hioload-ws) [![pkg.go.dev](https://pkg.go.dev/badge/github.com/momentics/hioload-ws)](https://pkg.go.dev/github.com/momentics/hioload-ws) [![Release](https://img.shields.io/github/v/release/momentics/hioload-ws)](https://github.com/momentics/hioload-ws/releases) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Dependencies](https://img.shields.io/librariesio/release/github/momentics/hioload-ws)](https://github.com/momentics/hioload-ws/pulls?utf8=%E2%9C%93&q=is%3Apr+label%3Adeps)
 
----
-
-**Автор:** momentics <momentics@gmail.com>  
-**Лицензия:** Apache 2.0
-
----
 
 | ![hioload-ws sponsors](image.png) | **Уважаемые спонсоры!** <br><br>Мы ищем партнёров для предоставления ультра-мощного тестового окружения в Москве для стресс-тестирования hioload-ws — WebSocket-библиотеки с микросекундным уровнем end-to-end задержки на экстремальных нагрузках.<br>Если ваша инфраструктура способна обеспечить миллионы конкурентных соединений и эффективный мониторинг p99 латентности — напишите нам для сотрудничества!<br><br>**Контакт:** momentics@gmail.com |
 | :-- | :-- |
 
 
+**Возможности**  
+- Zero-copy передача данных с NUMA-aware буферными пулами  
+- Poll-mode I/O (epoll, IOCP, поддержка io_uring)  
+- Lock-free и wait-free структуры для конкурентности  
+- Батч-обработка запросов для максимальной пропускной способности  
+- Плагинные транспорты: TCP, DPDK, io_uring, Windows IOCP  
+- CPU/NUMA фааштшен и поддержка hugepages для минимальной латентности  
+- Горячая перезагрузка конфигурации, runtime-метрики и debug-proбы  
+
+**Поддерживаемые платформы**  
+- Linux (ядро ≥6.20)  
+- Windows Server (2016+)  
+- Go 1.21+ (рекомендуется 1.23)  
+
+## Производительность
+
+2×Intel Xeon Gold 6248R (24C, 48T, 3.0GHz), 256ГБ DDR4, 2×1.92ТБ NVMe, 2×100GbE, NUMA, Gentoo Linux 6.12 / Windows Server 2019 Datacenter
+
+![hioload performance troughtput](perf-troughtput.png)
+![hioload latency](perf-latency-desribution.png)
+![hioload latency deviation](perf-latency-deviation.png)
 ---
 
 ## Обзор
@@ -58,13 +73,6 @@
 - **Обширная документация**
   Все исходники детально описаны на английском, включая архитектуру модулей и тюнинг.
 
-## Производительность
-
-2×Intel Xeon Gold 6248R (24C, 48T, 3.0GHz), 256ГБ DDR4, 2×1.92ТБ NVMe, 2×100GbE, NUMA, Gentoo Linux 6.12 / Windows Server 2019 Datacenter
-
-![hioload performance troughtput](perf-troughtput.png)
-![hioload latency](perf-latency-desribution.png)
-![hioload latency deviation](perf-latency-deviation.png)
 ---
 
 ## Оглавление
