@@ -1,0 +1,50 @@
+# File: .goreleaser.yml
+# GoReleaser configuration for hioload-ws.
+#
+# Author: momentics <momentics@gmail.com>
+# License: Apache-2.0
+
+project_name: hioload-ws
+
+release:
+  github:
+    owner: momentics
+    name: hioload-ws
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+
+archives:
+  - format: tar.gz
+    replacements:
+      darwin: macOS
+      amd64: x86_64
+    files:
+      - LICENSE
+      - README.md
+      - hioload-ws.md
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapcraft:
+  name: hioload-ws
+
+brew:
+  github:
+    owner: momentics
+    name: homebrew-tap
+
+changelog:
+  filters:
+    exclude:
+      - '^docs?:'
+      - '^test:'
