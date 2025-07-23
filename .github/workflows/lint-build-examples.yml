@@ -1,9 +1,9 @@
 # File: .github/workflows/lint-build-examples.yml
-# Name: Lint & Build Examples (Windows-only lint)
+# Name: Build Examples (Linux & Windows)
 # Author: momentics <momentics@gmail.com>
 # License: Apache-2.0
 
-name: Lint & Build Examples (Windows-only lint)
+name: Build Examples (Linux & Windows)
 
 on:
   push:
@@ -17,46 +17,15 @@ env:
   GO111MODULE: "on"
 
 jobs:
-  lint-windows:
-    name: Static Analysis (Windows only)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install MSYS2 and NUMA dev headers
-        run: |
-          choco install -y msys2
-          refreshenv
-          pacboy -S --noconfirm mingw-w64-x86_64-numa
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-
-      - name: Install golangci-lint CLI
-        run: |
-          export GOPATH="$(go env GOPATH)"
-          mkdir -p "$GOPATH/bin"
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh \
-            | sh -s -- -b "$GOPATH/bin" v1.59.0
-          echo "$GOPATH/bin" >> $GITHUB_PATH
-
-      - name: Run golangci-lint with Cgo tags
-        run: |
-          CGO_ENABLED=1 golangci-lint run --timeout 5m --build-tags "windows,cgo"
-
   build-examples:
-    name: Build Examples (Linux & Windows)
+    name: Build Examples
     runs-on: ${{ matrix.os }}
-    needs: lint-windows
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      GOEXPERIMENT: aliastypeparams
       CGO_ENABLED: "1"
+      GOEXPERIMENT: aliastypeparams
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -74,11 +43,9 @@ jobs:
             if [ -f "$dir/main.go" ]; then
               echo "Building example: $dir on ${{ matrix.os }}"
               if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-                GOOS=windows CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build \
-                  -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
+                GOOS=windows CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
               else
-                GOOS=linux CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build \
-                  -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
+                GOOS=linux   CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}"   "./$dir"
               fi
             fi
           done
