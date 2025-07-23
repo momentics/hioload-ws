@@ -1,5 +1,4 @@
 // File: internal/concurrency/affinity.go
-// Package concurrency provides cross-platform affinity API.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
@@ -7,28 +6,28 @@
 
 package concurrency
 
-// PreferredCPUID returns a recommended CPU core for numaNode; -1 for any.
+// PreferredCPUID returns a recommended CPU core for the given NUMA node.
 func PreferredCPUID(numaNode int) int {
 	return platformPreferredCPUID(numaNode)
 }
 
-// CurrentNUMANodeID returns the NUMA node ID of current thread or -1.
+// CurrentNUMANodeID returns the NUMA node ID of the current thread.
 func CurrentNUMANodeID() int {
 	return platformCurrentNUMANodeID()
 }
 
-// NUMANodes returns total NUMA nodes count (>=1).
+// NUMANodes returns the total number of NUMA nodes (>=1).
 func NUMANodes() int {
 	return platformNUMANodes()
 }
 
 // PinCurrentThread binds the current OS thread to CPU and NUMA.
-// cpuID<0 means any CPU, numaNode<0 means any node.
+// cpuID<0 means any CPU; numaNode<0 means any NUMA node.
 func PinCurrentThread(numaNode, cpuID int) error {
 	return platformPinCurrentThread(numaNode, cpuID)
 }
 
-// UnpinCurrentThread clears affinity constraints.
+// UnpinCurrentThread clears any affinity constraints.
 func UnpinCurrentThread() error {
 	return platformUnpinCurrentThread()
 }
