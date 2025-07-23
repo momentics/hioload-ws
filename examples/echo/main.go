@@ -2,19 +2,20 @@
 // Package main
 // Native WebSocket Echo server using hioload-ws without HTTP dependency.
 // Demonstrates true zero-copy, NUMA-aware, high-performance WebSocket handling.
-// This version uses sensible defaults from facade.DefaultConfig() and allows
-// overriding only the address via flag. English comments explain key parts.
+// Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
 
 package main
 
 import (
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"sync/atomic"
 	"syscall"
-	"time"
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/facade"
@@ -23,16 +24,12 @@ import (
 )
 
 func main() {
-	// Allow overriding only the listen address; other parameters come from defaults.
-	addr := flag.String("addr", "", "WebSocket listen address (default from config)")
+	addr := flag.String("addr", ":9001", "WebSocket listen address")
 	flag.Parse()
 
-	// Build facade configuration with defaults.
 	cfg := facade.DefaultConfig()
-	if *addr != "" {
-		cfg.ListenAddr = *addr
-	}
-	// Initialize facade.
+	cfg.ListenAddr = *addr
+
 	hioload, err := facade.New(cfg)
 	if err != nil {
 		log.Fatalf("failed to create HioloadWS: %v", err)
@@ -42,94 +39,73 @@ func main() {
 	}
 	defer hioload.Stop()
 
-	// Register debug probe for active connections.
-	var connectionCount int32
+	var connCount int32
 	hioload.GetControl().RegisterDebugProbe("active_connections", func() any {
-		return atomic.LoadInt32(&connectionCount)
+		return atomic.LoadInt32(&connCount)
 	})
 
-	log.Printf("Echo server starting on %s", cfg.ListenAddr)
+	log.Printf("Echo server listening on %s", cfg.ListenAddr)
 
-	// Setup native WebSocket listener.
-	bufPool := hioload.GetBufferPool()
-	listener, err := transport.NewWebSocketListener(cfg.ListenAddr, bufPool, cfg.ChannelSize)
+	listener, err := transport.NewWebSocketListener(cfg.ListenAddr, hioload.GetBufferPool(), cfg.ChannelSize)
 	if err != nil {
 		log.Fatalf("failed to create listener: %v", err)
 	}
 	defer listener.Close()
 
-	// Scheduler for heartbeat and shutdown timers.
-	scheduler := hioload.GetScheduler()
-	cfgMap := hioload.GetControl().GetConfig()
-	hbInterval := cfgMap["heartbeat_interval"].(int64)
-	shutdownTimeout := cfgMap["shutdown_timeout"].(int64)
+	acceptDone := make(chan struct{})
 
 	go func() {
+		defer close(acceptDone)
 		for {
 			wsConn, err := listener.Accept()
 			if err != nil {
+				if errors.Is(err, transport.ErrListenerClosed) {
+					log.Println("Listener closed, exiting accept loop")
+					return
+				}
 				log.Printf("accept error: %v", err)
 				continue
 			}
-			atomic.AddInt32(&connectionCount, 1)
 
-			// Echo handler.
+			id := fmt.Sprintf("conn-%d", atomic.AddInt32(&connCount, 1))
+			log.Printf("Client connected: %s", id)
+
+			// Prepare handler
 			echoHandler := adapters.HandlerFunc(func(data any) error {
-				switch d := data.(type) {
-				case []byte:
-					return wsConn.Send(&protocol.WSFrame{
-						IsFinal:    true,
-						Opcode:     protocol.OpcodeBinary,
-						PayloadLen: int64(len(d)),
-						Payload:    d,
-					})
+				buf, ok := data.([]byte)
+				if !ok {
+					return nil
 				}
-				return nil
+				return wsConn.Send(&protocol.WSFrame{
+					IsFinal:    true,
+					Opcode:     protocol.OpcodeBinary,
+					PayloadLen: int64(len(buf)),
+					Payload:    buf,
+				})
 			})
 			mw := adapters.NewMiddlewareHandler(echoHandler).
 				Use(adapters.LoggingMiddleware).
 				Use(adapters.RecoveryMiddleware).
 				Use(adapters.MetricsMiddleware(hioload.GetControl()))
+
 			wsConn.SetHandler(mw)
 			wsConn.Start()
 
-			// Heartbeat based on configured interval.
-			scheduler.Schedule(hbInterval, func() {
-				wsConn.Send(&protocol.WSFrame{
-					IsFinal:    true,
-					Opcode:     protocol.OpcodePing,
-					PayloadLen: 0,
-				})
-			})
-
-			// Decrement count on close.
-			go func() {
+			go func(connID string) {
 				<-wsConn.Done()
-				atomic.AddInt32(&connectionCount, -1)
-			}()
+				log.Printf("Client disconnected: %s", connID)
+				atomic.AddInt32(&connCount, -1)
+			}(id)
 		}
 	}()
 
-	// Handle shutdown signal.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	log.Println("Shutdown signal received, initiating graceful shutdown")
-
-	// Schedule force exit after configured timeout.
-	shutdownDone := make(chan struct{})
-	scheduler.Schedule(shutdownTimeout, func() {
-		log.Println("Graceful shutdown timed out, forcing exit")
-		close(shutdownDone)
-	})
+	log.Println("Shutdown signal received, closing listener")
 
 	listener.Close()
+	<-acceptDone
 
-	// Wait for either all connections to close or timeout.
-	select {
-	case <-shutdownDone:
-	case <-time.After(time.Duration(shutdownTimeout)):
-	}
-
-	log.Println("Server exited")
+	log.Println("Server shutdown complete")
 }

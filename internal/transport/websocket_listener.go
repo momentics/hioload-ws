@@ -6,6 +6,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -13,6 +14,10 @@ import (
 	"github.com/momentics/hioload-ws/api"
 	"github.com/momentics/hioload-ws/protocol"
 )
+
+// ErrListenerClosed is returned by Accept when the listener has been closed.
+// This sentinel error is used to signal graceful shutdown.
+var ErrListenerClosed = errors.New("listener closed")
 
 // WebSocketListener provides direct native WebSocket connections.
 type WebSocketListener struct {
@@ -36,21 +41,26 @@ func NewWebSocketListener(addr string, bufPool api.BufferPool, channelSize int) 
 }
 
 // Accept returns a ready WSConnection after completing handshake.
+// If the listener is closed, ErrListenerClosed is returned to allow
+// callers to exit accept loops gracefully.
 func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 	if wsl.closed {
-		return nil, fmt.Errorf("listener closed")
+		return nil, ErrListenerClosed
 	}
 	conn, err := wsl.listener.Accept()
 	if err != nil {
+		if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+			return nil, ErrListenerClosed
+		}
 		return nil, fmt.Errorf("accept connection: %w", err)
 	}
-	// Выполняем единый core-handshake
+	// Perform handshake core
 	hdrs, err := protocol.DoHandshakeCore(conn)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("websocket handshake core: %w", err)
 	}
-	// Отправляем ответ
+	// Write the response
 	var sb strings.Builder
 	sb.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
 	for k, vs := range hdrs {
@@ -63,12 +73,13 @@ func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 		conn.Close()
 		return nil, fmt.Errorf("write handshake response: %w", err)
 	}
-	// Создаём WSConnection
+	// Create WSConnection
 	tr := &connTransport{conn: conn, bufferPool: wsl.bufferPool}
 	return protocol.NewWSConnection(tr, wsl.bufferPool, wsl.channelSize), nil
 }
 
-// Close shuts down the listener.
+// Close shuts down the listener to stop Accept.
+// After Close, Accept returns ErrListenerClosed.
 func (wsl *WebSocketListener) Close() error {
 	if wsl.closed {
 		return nil
@@ -105,7 +116,6 @@ func (ct *connTransport) Recv() ([][]byte, error) {
 	if ct.closed {
 		return nil, api.ErrTransportClosed
 	}
-	// Single-frame read for simplicity
 	b := ct.bufferPool.Get(4096, -1)
 	n, err := ct.conn.Read(b.Bytes())
 	if err != nil {
