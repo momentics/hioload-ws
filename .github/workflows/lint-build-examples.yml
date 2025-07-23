@@ -2,9 +2,6 @@
 # Name: Build Examples (Linux & Windows)
 # Author: momentics <momentics@gmail.com>
 # License: Apache-2.0
-#
-# This workflow builds all example programs on both Linux and Windows
-# with Go 1.23 (+ GOEXPERIMENT=aliastypeparams and CGO_ENABLED=1).
 
 name: Build Examples (Linux & Windows)
 
@@ -16,7 +13,7 @@ on:
 env:
   GO_VERSION: "1.23"
   GOEXPERIMENT: aliastypeparams
-  CGO_ENABLED: "1"
+  CGO_ENABLED: "0"        # Disable Cgo to use the no-Cgo stub
   GO111MODULE: "on"
 
 jobs:
@@ -27,8 +24,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
+      CGO_ENABLED: "0"
       GOEXPERIMENT: aliastypeparams
-      CGO_ENABLED: "1"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -53,9 +50,11 @@ jobs:
             if [ -f "$dir/main.go" ]; then
               echo "Building example: $dir on ${{ matrix.os }}"
               if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-                CGO_ENABLED=1 GOOS=windows GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
+                CGO_ENABLED=0 GOOS=windows GOEXPERIMENT=aliastypeparams \
+                  go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
               else
-                CGO_ENABLED=1 GOOS=linux GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
+                CGO_ENABLED=0 GOOS=linux GOEXPERIMENT=aliastypeparams \
+                  go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
               fi
             fi
           done
