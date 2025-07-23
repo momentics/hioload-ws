@@ -1,4 +1,4 @@
-name: Build & Test Examples (Linux & Windows)
+name: Lint, Build & Test (Linux & Windows)
 
 on:
   push:
@@ -12,8 +12,8 @@ env:
   GO111MODULE: "on"
 
 jobs:
-  build-and-test:
-    name: Build Examples and Run Tests
+  build-test:
+    name: Build, Lint & Test
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -21,44 +21,48 @@ jobs:
     env:
       CGO_ENABLED: "0"
       GOEXPERIMENT: aliastypeparams
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Install libnuma-dev on Linux
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libnuma-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Download dependencies
+      - name: Install dependencies
+        run: go mod tidy
+
+      - name: Run linters
         run: |
-          go mod tidy
+          go install golang.org/x/lint/golint@latest
+          golint ./...
 
       - name: Run library tests
         run: |
-          go test ./... -v -timeout 10m
+          go test ./control/... ./api/... ./adapters/... ./pool/... ./protocol/... ./facade/... ./internal/session/... -v -timeout 10m
 
-      - name: Build all examples
+      - name: Run example tests
+        run: |
+          go test ./examples/broadcast/... ./examples/echo/... -v -timeout 5m
+
+      - name: Run internal transport & websocket tests
+        run: |
+          go test ./internal/transport/... ./internal/websocket/... ./internal/concurrency/... -v -timeout 10m
+
+      - name: Build examples
         shell: bash
         working-directory: ./examples
         run: |
-          mkdir -p ../../dist/examples/${{ matrix.os }}
+          mkdir -p ../dist/${{ matrix.os }}
           for dir in */; do
-            if [ -f "$dir/main.go" ]; then
-              echo "Building example: $dir on ${{ matrix.os }}"
-              if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-                CGO_ENABLED=0 GOOS=windows GOEXPERIMENT=aliastypeparams \
-                  go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
-              else
-                CGO_ENABLED=0 GOOS=linux GOEXPERIMENT=aliastypeparams \
-                  go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
-              fi
+            [ -f "$dir/main.go" ] || continue
+            out="../dist/${{ matrix.os }}/${dir%/}"
+            if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+              CGO_ENABLED=0 GOOS=windows GOEXPERIMENT=aliastypeparams go build -o "${out}.exe" "./$dir"
+            else
+              CGO_ENABLED=0 GOOS=linux GOEXPERIMENT=aliastypeparams go build -o "${out}" "./$dir"
             fi
           done
 
@@ -66,4 +70,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: example-binaries-${{ matrix.os }}
-          path: dist/examples/${{ matrix.os }}/
+          path: dist/${{ matrix.os }}/
