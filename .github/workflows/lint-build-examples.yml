@@ -13,45 +13,18 @@ on:
 env:
   GO_VERSION: "1.23"
   GOEXPERIMENT: aliastypeparams
-  CGO_ENABLED: "1"            # Enable Cgo for static analysis
+  CGO_ENABLED: "1"
   GO111MODULE: "on"
 
 jobs:
   lint:
     name: Static Analysis
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: "1"
-      GOEXPERIMENT: aliastypeparams
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Create golangci-lint config
-        run: |
-          cat > .golangci.yml << 'EOF'
-          run:
-            timeout: 5m
-            build-tags:
-              - "linux"
-              - "cgo"
-          linters:
-            enable:
-              - gofmt
-              - govet
-              - staticcheck
-              - errcheck
-              - ineffassign
-              - misspell
-              - unused
-          issues:
-            exclude-rules:
-              - path: internal/concurrency/affinity_linux.go
-                text: "could not determine kind of name for C."
-          EOF
-
-      - name: Install libnuma-dev
-        if: runner.os == 'Linux'
+      - name: Install dependencies for Cgo
         run: |
           sudo apt-get update
           sudo apt-get install -y libnuma-dev
@@ -61,11 +34,13 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v5
-        with:
-          version: v1.59
-          config: .golangci.yml
+      - name: Install golangci-lint CLI
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $GOPATH/bin v1.59.0
+
+      - name: Run golangci-lint with Cgo tags
+        run: |
+          CGO_ENABLED=1 golangci-lint run --timeout 5m --build-tags "linux cgo,windows cgo"
 
   build-examples:
     name: Build Examples
@@ -96,7 +71,7 @@ jobs:
               if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
                 GOOS=windows CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
               else
-                GOOS=linux   CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}"   "./$dir"
+                GOOS=linux CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
               fi
             fi
           done
