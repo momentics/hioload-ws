@@ -3,8 +3,8 @@
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// baseBufferPool is the common core for all platform buffer pools.
-// It manages per-NUMA-node channels of buffers and tracks basic pool operations.
+// This file implements baseBufferPool without using Go generics, managing channels
+// of api.Buffer. Concrete buffer types (linuxBuffer, windowsBuffer) satisfy api.Buffer.
 
 package pool
 
@@ -15,52 +15,45 @@ import (
 	"github.com/momentics/hioload-ws/api"
 )
 
-// bufferFactory defines how to create a new buffer of type T.
-type bufferFactory[T api.Buffer] func(size int, numaNode int) T
-
-// baseBufferPool implements api.BufferPool.
-// T is a concrete Buffer type (e.g. *linuxBuffer or *windowsBuffer).
-type baseBufferPool[T api.Buffer] struct {
-	// pools maps NUMA node => buffered channel of buffers.
-	pools   map[int]chan T
-	mu      sync.Mutex
-	factory bufferFactory[T]
-
-	// Statistics counters.
+// baseBufferPool implements api.BufferPool by maintaining per-NUMA-node channels
+// of api.Buffer. It uses a factory function to create new buffers.
+type baseBufferPool struct {
+	pools      map[int]chan api.Buffer
+	mu         sync.Mutex
+	factory    func(size int, numaNode int) api.Buffer
 	totalAlloc atomic.Int64
 	totalFree  atomic.Int64
-	// per-NUMA free counts: map[node]*atomic.Int64
-	numaStats sync.Map
+	numaStats  sync.Map // map[int]*atomic.Int64
 }
 
-// newBaseBufferPool constructs a new baseBufferPool for the given initial NUMA node.
-func newBaseBufferPool[T api.Buffer](initialNUMA int, factory bufferFactory[T]) *baseBufferPool[T] {
-	return &baseBufferPool[T]{
-		pools:   map[int]chan T{initialNUMA: make(chan T, 1024)},
+// newBaseBufferPool constructs a new baseBufferPool for the specified NUMA node.
+func newBaseBufferPool(numaNode int, factory func(size, numaNode int) api.Buffer) *baseBufferPool {
+	return &baseBufferPool{
+		pools:   map[int]chan api.Buffer{numaNode: make(chan api.Buffer, 1024)},
 		factory: factory,
 	}
 }
 
-// getChan returns or creates the channel for the specified numaNode.
-func (p *baseBufferPool[T]) getChan(numaNode int) chan T {
+// getChan returns or lazily creates the channel for a given NUMA node.
+func (p *baseBufferPool) getChan(numaNode int) chan api.Buffer {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	ch, ok := p.pools[numaNode]
 	if !ok {
-		ch = make(chan T, 1024)
+		ch = make(chan api.Buffer, 1024)
 		p.pools[numaNode] = ch
 	}
-	p.mu.Unlock()
 	return ch
 }
 
-// Get retrieves a buffer of at least size bytes, preferring numaNode.
-// It reuses an existing buffer if available, else allocates a new one.
-func (p *baseBufferPool[T]) Get(size, numaNode int) api.Buffer {
+// Get retrieves a buffer of at least the requested size, preferring the specified NUMA node.
+// If reuse is not possible, allocates via factory.
+func (p *baseBufferPool) Get(size, numaNode int) api.Buffer {
 	ch := p.getChan(numaNode)
 	select {
 	case buf := <-ch:
-		// Reuse only if capacity suffices.
-		if cap(buf.Bytes()) < size {
+		data := buf.Bytes()
+		if cap(data) < size {
 			p.totalAlloc.Add(1)
 			return p.factory(size, numaNode)
 		}
@@ -71,40 +64,34 @@ func (p *baseBufferPool[T]) Get(size, numaNode int) api.Buffer {
 	}
 }
 
-// Put returns a buffer to the pool. Updates statistics counters.
-func (p *baseBufferPool[T]) Put(b api.Buffer) {
-	if tb, ok := b.(T); ok {
-		node := tb.NUMANode()
-		ch := p.getChan(node)
-		select {
-		case ch <- tb:
-			p.totalFree.Add(1)
-			// update per-NUMA stats
-			v, _ := p.numaStats.LoadOrStore(node, &atomic.Int64{})
-			counter := v.(*atomic.Int64)
-			counter.Add(1)
-		default:
-			// pool channel full; drop buffer
-		}
+// Put returns a buffer to its NUMA-node channel and updates stats.
+func (p *baseBufferPool) Put(b api.Buffer) {
+	node := b.NUMANode()
+	ch := p.getChan(node)
+	select {
+	case ch <- b:
+		p.totalFree.Add(1)
+		v, _ := p.numaStats.LoadOrStore(node, &atomic.Int64{})
+		v.(*atomic.Int64).Add(1)
+	default:
+		// drop if full
 	}
 }
 
-// recycle is an alias for Put, used by platform-specific Release() implementations.
-func (p *baseBufferPool[T]) recycle(b T) {
+// recycle is an alias for Put, used by concrete buffer Release methods.
+func (p *baseBufferPool) recycle(b api.Buffer) {
 	p.Put(b)
 }
 
-// Stats returns current pool usage statistics per api.BufferPoolStats.
-func (p *baseBufferPool[T]) Stats() api.BufferPoolStats {
+// Stats returns current pool usage statistics.
+func (p *baseBufferPool) Stats() api.BufferPoolStats {
 	totalAlloc := p.totalAlloc.Load()
 	totalFree := p.totalFree.Load()
 	inUse := totalAlloc - totalFree
 
 	numaMap := make(map[int]int64)
-	p.numaStats.Range(func(key, value any) bool {
-		node := key.(int)
-		count := value.(*atomic.Int64).Load()
-		numaMap[node] = count
+	p.numaStats.Range(func(k, v any) bool {
+		numaMap[k.(int)] = v.(*atomic.Int64).Load()
 		return true
 	})
 

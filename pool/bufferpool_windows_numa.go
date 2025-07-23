@@ -1,12 +1,14 @@
+// File: pool/bufferpool_windows_numa.go
 //go:build windows
 // +build windows
 
-// File: pool/bufferpool_windows_numa.go
-// Package pool provides Windows NUMA allocation helper.
+//
+// Package pool provides Windows NUMA helper functions.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// virtualAllocExNuma wraps Windows VirtualAllocExNuma for explicit NUMA control.
+// This file exposes virtualAllocOnNode for explicit NUMA-aware allocation.
+// We remove the duplicate proc declaration present in bufferpool_windows.go.
 
 package pool
 
@@ -14,11 +16,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// virtualAllocExNuma allocates memory on a specified NUMA node.
-// Returns pointer or error.
-func virtualAllocExNuma(process windows.Handle, size int, node uint32) (uintptr, error) {
-	proc := windows.NewLazySystemDLL("kernel32.dll").
-		NewProc("VirtualAllocExNuma")
+// virtualAllocOnNode allocates 'size' bytes on the specified NUMA node in 'process'.
+// It wraps Windows VirtualAllocExNuma and returns the base address or error.
+func virtualAllocOnNode(process windows.Handle, size int, node uint32) (uintptr, error) {
+	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("VirtualAllocExNuma")
 	addr, _, err := proc.Call(
 		uintptr(process),
 		0,
