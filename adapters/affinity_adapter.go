@@ -1,12 +1,9 @@
 // File: adapters/affinity_adapter.go
+//
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 // Description:
-//   Adapter implementing the api.Affinity interface, delegating to
-//   internal concurrency primitives for CPU and NUMA pinning.
-//
-// Package adapters provides glue code between the core API contracts
-// and the internal implementation.
+//   Adapter exposing the api.Affinity interface, backed by internal concurrency primitives.
 
 package adapters
 
@@ -15,8 +12,7 @@ import (
 	"github.com/momentics/hioload-ws/internal/concurrency"
 )
 
-// AffinityAdapter implements api.Affinity using internal concurrency functions.
-// It tracks current CPU and NUMA bindings and manages pin/unpin operations.
+// AffinityAdapter implements api.Affinity by delegating to internal concurrency.
 type AffinityAdapter struct {
 	currentCPU  int
 	currentNUMA int
@@ -24,8 +20,7 @@ type AffinityAdapter struct {
 	scope       api.AffinityScope
 }
 
-// NewAffinityAdapter creates a new AffinityAdapter with default thread scope.
-// Default CPU and NUMA IDs are set to -1 (no binding).
+// NewAffinityAdapter constructs a new AffinityAdapter with default thread scope.
 func NewAffinityAdapter() api.Affinity {
 	return &AffinityAdapter{
 		currentCPU:  -1,
@@ -35,33 +30,26 @@ func NewAffinityAdapter() api.Affinity {
 	}
 }
 
-// Pin assigns the calling entity (thread) to a specific CPU and/or NUMA node.
-// cpuID: -1 means any CPU; numaID: -1 means any NUMA node.
-func (a *AffinityAdapter) Pin(cpuID int, numaID int) error {
-	// If cpuID is unspecified, choose preferred CPU for the given NUMA node
-	if cpuID == -1 {
+// Pin binds the current OS thread to cpuID and/or numaID.
+// If cpuID or numaID is -1, a reasonable default is chosen.
+func (a *AffinityAdapter) Pin(cpuID, numaID int) error {
+	if cpuID < 0 {
 		cpuID = concurrency.PreferredCPUID(numaID)
 	}
-	// If numaID is unspecified, detect current NUMA node
-	if numaID == -1 {
+	if numaID < 0 {
 		numaID = concurrency.CurrentNUMANodeID()
 	}
-
-	// Delegate to internal implementation
 	if err := concurrency.PinCurrentThread(numaID, cpuID); err != nil {
 		return err
 	}
-
-	// Update state
 	a.currentCPU = cpuID
 	a.currentNUMA = numaID
 	a.pinned = true
 	return nil
 }
 
-// Unpin clears any CPU/NUMA binding, allowing the OS scheduler to migrate the thread.
+// Unpin releases any CPU/NUMA binding on this thread.
 func (a *AffinityAdapter) Unpin() error {
-	// On Linux/Windows, use internal unpin to reset affinity
 	if err := concurrency.UnpinCurrentThread(); err != nil {
 		return err
 	}
@@ -71,8 +59,8 @@ func (a *AffinityAdapter) Unpin() error {
 	return nil
 }
 
-// Get returns the currently effective CPU and NUMA IDs for this adapter.
-func (a *AffinityAdapter) Get() (cpuID int, numaID int, err error) {
+// Get returns the currently pinned CPU and NUMA node.
+func (a *AffinityAdapter) Get() (cpuID, numaID int, err error) {
 	return a.currentCPU, a.currentNUMA, nil
 }
 
@@ -81,8 +69,7 @@ func (a *AffinityAdapter) Scope() api.AffinityScope {
 	return a.scope
 }
 
-// ImmutableDescriptor returns a snapshot of the current binding state,
-// useful for metrics, logging, or diagnostics.
+// ImmutableDescriptor returns a snapshot of the current binding state.
 func (a *AffinityAdapter) ImmutableDescriptor() api.AffinityDescriptor {
 	return api.AffinityDescriptor{
 		CPUID:  a.currentCPU,

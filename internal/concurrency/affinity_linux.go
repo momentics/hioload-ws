@@ -1,7 +1,14 @@
 // File: internal/concurrency/affinity_linux.go
+//go:build linux && cgo
+// +build linux,cgo
+
+//
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
-// Description: Linux-specific CPU/NUMA affinity implementation.
+// Description:
+//   Linux-specific CPU and NUMA affinity implementation.
+//   Exposes functions to query NUMA topology and pin OS threads to given CPU/NUMA,
+//   leveraging libnuma and pthread_setaffinity_np via Cgo.
 
 package concurrency
 
@@ -18,14 +25,14 @@ import (
 	"runtime"
 )
 
-// platformPreferredCPUID returns a recommended CPU core index for the given NUMA node.
+// platformPreferredCPUID returns a suggested CPU core index for the given NUMA node.
 // If numaNode < 0 or NUMA is unavailable, falls back to CPU 0.
 func platformPreferredCPUID(numaNode int) int {
 	if numaNode < 0 || C.numa_available() < 0 {
 		return 0
 	}
-	totalCPUs := runtime.NumCPU()
-	for cpu := 0; cpu < totalCPUs; cpu++ {
+	total := runtime.NumCPU()
+	for cpu := 0; cpu < total; cpu++ {
 		if int(C.numa_node_of_cpu(C.int(cpu))) == numaNode {
 			return cpu
 		}
@@ -34,7 +41,7 @@ func platformPreferredCPUID(numaNode int) int {
 }
 
 // platformCurrentNUMANodeID returns the NUMA node ID of the current thread.
-// Returns -1 if NUMA is unavailable or an error occurs.
+// Returns -1 if NUMA is unavailable or error occurs.
 func platformCurrentNUMANodeID() int {
 	if C.numa_available() < 0 {
 		return -1
@@ -46,7 +53,7 @@ func platformCurrentNUMANodeID() int {
 	return int(C.numa_node_of_cpu(C.int(cpu)))
 }
 
-// platformNUMANodes returns the total number of configured NUMA nodes on the system.
+// platformNUMANodes returns the total number of configured NUMA nodes.
 // Returns 1 if NUMA is unavailable.
 func platformNUMANodes() int {
 	if C.numa_available() < 0 {
@@ -56,9 +63,10 @@ func platformNUMANodes() int {
 }
 
 // platformPinCurrentThread binds the current OS thread to the specified CPU and NUMA node.
-// - If cpuID >= 0: sets CPU affinity using pthread_setaffinity_np.
-// - If numaNode >= 0 and NUMA available: binds the thread to the specified NUMA node.
-// The thread is locked to the OS thread to maintain affinity.
+//   - If cpuID >= 0: calls pthread_setaffinity_np to pin to that core.
+//   - If numaNode >= 0 and NUMA available: calls numa_run_on_node.
+//
+// Locks the goroutine to its OS thread to maintain affinity.
 func platformPinCurrentThread(numaNode, cpuID int) error {
 	runtime.LockOSThread()
 
@@ -80,7 +88,7 @@ func platformPinCurrentThread(numaNode, cpuID int) error {
 	return nil
 }
 
-// platformUnpinCurrentThread clears any CPU affinity, allowing the OS to schedule the thread anywhere.
+// platformUnpinCurrentThread clears any CPU affinity, allowing the OS to schedule the thread freely.
 func platformUnpinCurrentThread() error {
 	runtime.LockOSThread()
 	var mask C.cpu_set_t
@@ -90,7 +98,7 @@ func platformUnpinCurrentThread() error {
 		C.CPU_SET(C.int(i), &mask)
 	}
 	if rc := C.pthread_setaffinity_np(C.pthread_self(), C.sizeof_cpu_set_t, &mask); rc != 0 {
-		return fmt.Errorf("pthread_unpin failed: %d", rc)
+		return fmt.Errorf("pthread_unpin current thread failed: %d", rc)
 	}
 	return nil
 }
