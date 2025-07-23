@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CGO_ENABLED: ${{ env.CGO_ENABLED }}
+      GOEXPERIMENT: ${{ env.GOEXPERIMENT }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -46,9 +47,6 @@ jobs:
         with:
           version: v1.59
           args: --timeout 5m
-        env:
-          GOEXPERIMENT: ${{ env.GOEXPERIMENT }}
-          CGO_ENABLED: ${{ env.CGO_ENABLED }}
 
   build-examples:
     name: Build Examples
@@ -58,8 +56,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      GOEXPERIMENT: aliastypeparams
       CGO_ENABLED: "1"
+      GOEXPERIMENT: aliastypeparams
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -77,9 +75,9 @@ jobs:
             if [ -f "$dir/main.go" ]; then
               echo "Building example: $dir on ${{ matrix.os }}"
               if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-                GOOS=windows GOEXPERIMENT=aliastypeparams CGO_ENABLED=1 go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
+                GOOS=windows CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
               else
-                GOOS=linux GOEXPERIMENT=aliastypeparams CGO_ENABLED=1 go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
+                GOOS=linux CGO_ENABLED=1 GOEXPERIMENT=aliastypeparams go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
               fi
             fi
           done
