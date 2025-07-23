@@ -1,54 +1,66 @@
-# File: .github/workflows/release.yml
-# This workflow publishes tagged releases of hioload-ws using GoReleaser,
-# which in turn generates GitHub releases, Docker images (if configured),
-# and drives pkg.go.dev documentation updates.
-#
+# File: .github/workflows/build-examples.yml
+# Name: Build Examples (Linux & Windows)
 # Author: momentics <momentics@gmail.com>
 # License: Apache-2.0
 
-name: Release
+name: Build Examples (Linux & Windows)
 
 on:
   push:
-    tags:
-      - 'v*.*.*'   # Trigger on semantic version tags like v1.2.3
+    branches: [main, develop]
+  pull_request:
+
+env:
+  GO_VERSION: "1.23"
+  GOEXPERIMENT: aliastypeparams
+  CGO_ENABLED: "0"        # Disable Cgo to use the no-Cgo stub
+  GO111MODULE: "on"
 
 jobs:
-  release:
-    name: Publish Release
-    runs-on: ubuntu-latest
-
+  build-examples:
+    name: Build Examples
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      CGO_ENABLED: "0"
+      GOEXPERIMENT: aliastypeparams
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install libnuma-dev on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnuma-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
-          check-latest: true
+          go-version: ${{ env.GO_VERSION }}
 
-      - name: Install GoReleaser
-        uses: goreleaser/action@v2
-        with:
-          version: latest
-          install: true
-
-      - name: Run GoReleaser
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build all examples
+        shell: bash
+        working-directory: ./examples
         run: |
-          # Create GitHub release, build archives, and push artifacts.
-          goreleaser release --rm-dist
-
-      - name: Trigger pkg.go.dev re-index
-        # Ping pkg.go.dev to ensure the new version is indexed immediately
-        run: |
-          for i in {1..3}; do
-            curl -s -o /dev/null "https://pkg.go.dev/github.com/momentics/hioload-ws?tab=doc" && break
-            sleep 10
+          mkdir -p ../../dist/examples/${{ matrix.os }}
+          for dir in */; do
+            if [ -f "$dir/main.go" ]; then
+              echo "Building example: $dir on ${{ matrix.os }}"
+              if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+                CGO_ENABLED=0 GOOS=windows GOEXPERIMENT=aliastypeparams \
+                  go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
+              else
+                CGO_ENABLED=0 GOOS=linux GOEXPERIMENT=aliastypeparams \
+                  go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
+              fi
+            fi
           done
 
-      - name: Verify pkg.go.dev indexing
-        run: |
-          echo "Check https://pkg.go.dev/github.com/momentics/hioload-ws for updated documentation."
+      - name: Upload example binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: example-binaries-${{ matrix.os }}
+          path: dist/examples/${{ matrix.os }}/
