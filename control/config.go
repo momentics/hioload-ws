@@ -1,7 +1,6 @@
 // control/config.go
-// Author: momentics <momentics@gmail.com>
-//
 // Thread-safe configuration store with dynamic update and hot-reload propagation.
+// This version introduces SetConfigSync for synchronous listener notification.
 
 package control
 
@@ -16,7 +15,7 @@ type ConfigStore struct {
 	listeners []func()
 }
 
-// NewConfigStore initializes a new config store with empty data.
+// NewConfigStore initializes a new config store.
 func NewConfigStore() *ConfigStore {
 	return &ConfigStore{
 		config:    make(map[string]any),
@@ -24,7 +23,7 @@ func NewConfigStore() *ConfigStore {
 	}
 }
 
-// GetSnapshot returns a copy of all config values.
+// GetSnapshot returns a copy of all config entries.
 func (cs *ConfigStore) GetSnapshot() map[string]any {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -35,7 +34,7 @@ func (cs *ConfigStore) GetSnapshot() map[string]any {
 	return copy
 }
 
-// SetConfig merges new values and dispatches reload if needed.
+// SetConfig merges new values and dispatches reload asynchronously (for production use).
 func (cs *ConfigStore) SetConfig(newCfg map[string]any) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -45,14 +44,27 @@ func (cs *ConfigStore) SetConfig(newCfg map[string]any) {
 	cs.dispatchReload()
 }
 
-// OnReload registers a listener hook called on config changes.
+// SetConfigSync merges new values and invokes all listeners synchronously (useful for tests).
+func (cs *ConfigStore) SetConfigSync(newCfg map[string]any) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	for k, v := range newCfg {
+		cs.config[k] = v
+	}
+	// Synchronously invoke each listener in the same goroutine.
+	for _, fn := range cs.listeners {
+		fn()
+	}
+}
+
+// OnReload registers a new reload callback.
 func (cs *ConfigStore) OnReload(fn func()) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.listeners = append(cs.listeners, fn)
 }
 
-// dispatchReload invokes all listeners.
+// dispatchReload invokes all listeners asynchronously (default for production).
 func (cs *ConfigStore) dispatchReload() {
 	for _, fn := range cs.listeners {
 		go fn()

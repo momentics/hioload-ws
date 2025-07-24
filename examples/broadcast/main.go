@@ -20,9 +20,9 @@ import (
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/facade"
 	"github.com/momentics/hioload-ws/internal/transport"
 	"github.com/momentics/hioload-ws/protocol"
+	"github.com/momentics/hioload-ws/server"
 )
 
 // BroadcastRegistry stores all currently connected clients for broadcasting.
@@ -95,10 +95,10 @@ func main() {
 	addr := flag.String("addr", ":9002", "WebSocket listen address")
 	flag.Parse()
 
-	cfg := facade.DefaultConfig()
+	cfg := server.DefaultConfig()
 	cfg.ListenAddr = *addr
 
-	hioload, err := facade.New(cfg)
+	hioload, err := server.New(cfg)
 	if err != nil {
 		log.Fatalf("failed to initialize hioload-ws: %v", err)
 	}

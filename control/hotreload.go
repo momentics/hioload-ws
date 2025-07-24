@@ -1,20 +1,26 @@
 // control/hotreload.go
-// Author: momentics <momentics@gmail.com>
-//
-// Hooks and interfaces for hot-reload-compatible components.
+// Manages global hot-reload hooks for config changes.
+// Adds a TriggerHotReloadSync for deterministic test notification.
 
 package control
 
 var reloadHooks []func()
 
-// RegisterReloadHook adds a component reload listener.
+// RegisterReloadHook adds a new component reload listener.
 func RegisterReloadHook(fn func()) {
 	reloadHooks = append(reloadHooks, fn)
 }
 
-// TriggerHotReload dispatches all reload hooks.
+// TriggerHotReload dispatches all reload hooks asynchronously.
 func TriggerHotReload() {
 	for _, fn := range reloadHooks {
 		go fn()
+	}
+}
+
+// TriggerHotReloadSync invokes all reload hooks synchronously (for test determinism).
+func TriggerHotReloadSync() {
+	for _, fn := range reloadHooks {
+		fn()
 	}
 }

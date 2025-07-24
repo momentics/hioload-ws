@@ -1,0 +1,53 @@
+Windows Registry Editor Version 5.00
+
+; =========================================================
+; hioload-ws: Maximum Connections & Handle Tuning for Windows 10
+; Author: momentics <momentics@gmail.com>
+; License: Apache-2.0
+;
+; This REG file applies system settings to:
+;   - Boost max ephemeral (dynamic) TCP port range for incoming/outgoing connections
+;   - Reduce TIME_WAIT timers to recycle sockets faster
+;   - Raise user/process handle limits to Server-grade levels
+;   - Remove connection throttling where allowed
+;
+; These settings are inspired by Windows Server defaults
+; and are generally safe for machines dedicated to high-load network services.
+; =========================================================
+
+; --- 1. Raise MaxUserPort (Ephemeral TCP Port Range: 1024–65534) ---
+; This enables up to 16,000+ outbound/inbound connections per IP.
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters]
+"MaxUserPort"=dword:0000fffe        ; 65534 - maximum allowed (default on Server is 65534, often 5000 or 49152 on Home)
+
+; --- 2. Reduce TIME_WAIT to Recycle Sockets Faster (Seconds) ---
+; Allows ports to be reused more quickly after connection closes.
+"TcpTimedWaitDelay"=dword:0000001e  ; 30 seconds (Server default: 30s; Home default: 240s)
+
+; --- 3. Increase TCP Connection Backlog ---
+; Raises the default receive queue for incomplete connection attempts.
+"TCPNumConnections"=dword:00fffffe  ; Massive backlog buffer
+
+; --- 4. Raise Number of Concurrent TCP Connections ---
+; On some SKUs, TCP stack may throttle the rate or backlog. This disables that.
+"MaxFreeTcbs"=dword:0000ffff        ; 65535 Transmission Control Blocks (TCB)
+"MaxHashTableSize"=dword:00010000   ; Hash table size for optimal connection lookup
+
+; --- 5. Increase System-Wide Handles Limit ---
+; By default, Windows 10 sets a user handle quota (~16,384 per process).
+; Raising this raises the maximum number of file, socket, and registry handles:
+[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems]
+; WARNING: Edit this only as Administrator, and BACK UP this key first.
+; Find the value named 'Windows' and append:
+;   -H8192
+; or
+;   -H32768
+; to raise per-process handle limits (H is for handles)
+; Example value:
+; %SystemRoot%\system32\csrss.exe ObjectDirectory=\Windows SharedSection=1024,20480,20480 Windows=On SubSystemType=Windows ServerDll=basesrv,1 ServerDll=winsrv:UserServerDllInitialization,3 ServerDll=csrsrv,1 -H32768
+
+; NOTE: Manual editing required! The REG file cannot patch the value in-place automatically.
+;   - Right-click Windows value, choose "Modify", append -H32768 at the end, save and reboot.
+
+; --- 6. Remove Half-Open Connection Limit (Windows 10 Home Only) ---
+; On some Home editions, half-open connection throttling is enforced; set below disables it

@@ -16,10 +16,10 @@ import (
 
 // WSFrame represents a decoded WebSocket frame.
 type WSFrame struct {
-	IsFinal    bool   // FIN bit
-	Opcode     byte   // Operation code
-	Masked     bool   // Whether the frame was masked
-	PayloadLen int64  // Actual payload length
+	IsFinal    bool  // FIN bit
+	Opcode     byte  // Operation code
+	Masked     bool  // Whether the frame was masked
+	PayloadLen int64 // Actual payload length
 	MaskKey    [4]byte
 	Payload    []byte // Zero-copy reference (owner managed via pooling)
 }

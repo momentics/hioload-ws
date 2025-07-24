@@ -18,9 +18,9 @@ import (
 	"syscall"
 
 	"github.com/momentics/hioload-ws/adapters"
-	"github.com/momentics/hioload-ws/facade"
 	"github.com/momentics/hioload-ws/internal/transport"
 	"github.com/momentics/hioload-ws/protocol"
+	"github.com/momentics/hioload-ws/server"
 )
 
 func main() {
@@ -29,11 +29,11 @@ func main() {
 	flag.Parse()
 
 	// Build and customize facade config
-	cfg := facade.DefaultConfig()
+	cfg := server.DefaultConfig()
 	cfg.ListenAddr = *addr
 
 	// Create high-performance WebSocket server facade
-	hioload, err := facade.New(cfg)
+	hioload, err := server.New(cfg)
 	if err != nil {
 		log.Fatalf("failed to create HioloadWS: %v", err)
 	}

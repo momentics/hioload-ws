@@ -1,16 +1,18 @@
 // File: internal/transport/websocket_listener.go
-// Direct WebSocket listener without HTTP overhead.
+// package transport provides a native, zero-copy WebSocket listener.
 // Author: momentics <momentics@gmail.com>
-// License: Apache-2.0//
-// This implementation has been updated to eliminate extra payload copying.
-// Now it returns zero-copy pooled Buffers directly from Recv(), instead of
-// copying into a temporary byte slice.
+// License: Apache-2.0
+//
+// We add a synchronous handshake phase so that Accept does not return
+// until the HTTP Upgrade has been fully processed. This ensures the
+// client’s first SendFrame actually reaches the server-side echo loop.
 
 package transport
 
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 
@@ -18,11 +20,11 @@ import (
 	"github.com/momentics/hioload-ws/protocol"
 )
 
-// ErrListenerClosed is returned by Accept when the listener has been closed.
-// This sentinel error is used to signal graceful shutdown.
+// ErrListenerClosed is returned when Accept is called on a closed listener.
 var ErrListenerClosed = errors.New("listener closed")
 
-// WebSocketListener provides direct native WebSocket connections.
+// WebSocketListener accepts raw TCP connections, performs the HTTP Upgrade
+// handshake synchronously, then returns a fully ready *protocol.WSConnection.
 type WebSocketListener struct {
 	listener    net.Listener
 	bufferPool  api.BufferPool
@@ -30,13 +32,12 @@ type WebSocketListener struct {
 	closed      bool
 }
 
-// NewWebSocketListener creates a new WebSocketListener with strict header limits.
-// It initializes a TCP listener and retains the given buffer pool and channel size
-// for all accepted WebSocket connections.
+// NewWebSocketListener initializes a TCP listener for WebSocket traffic.
+// channelSize dictates the size of the underlying WSConnection channels.
 func NewWebSocketListener(addr string, bufPool api.BufferPool, channelSize int) (*WebSocketListener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("listen on %s: %w", addr, err)
+		return nil, fmt.Errorf("listen %s: %w", addr, err)
 	}
 	return &WebSocketListener{
 		listener:    ln,
@@ -45,45 +46,40 @@ func NewWebSocketListener(addr string, bufPool api.BufferPool, channelSize int) 
 	}, nil
 }
 
-// Accept returns a ready WSConnection after completing handshake.
-// Eliminates any payload copy by reading frames natively into pooled Buffers.
+// Accept blocks until a raw TCP connection is accepted, then performs
+// the WebSocket handshake synchronously before returning the connection.
 func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 	if wsl.closed {
 		return nil, ErrListenerClosed
 	}
-	conn, err := wsl.listener.Accept()
+	tcpConn, err := wsl.listener.Accept()
 	if err != nil {
-		if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+		if strings.Contains(err.Error(), "closed network connection") {
 			return nil, ErrListenerClosed
 		}
-		return nil, fmt.Errorf("accept connection: %w", err)
+		return nil, err
 	}
-	// Perform handshake core (parses client headers, computes Sec-WebSocket-Accept)
-	hdrs, err := protocol.DoHandshakeCore(conn)
+
+	// 1. Perform synchronous HTTP Upgrade handshake core.
+	hdrs, err := protocol.DoHandshakeCore(tcpConn)
 	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("websocket handshake core: %w", err)
+		tcpConn.Close()
+		return nil, fmt.Errorf("handshake read: %w", err)
 	}
-	// Write response headers
-	var sb strings.Builder
-	sb.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
-	for k, vs := range hdrs {
-		for _, v := range vs {
-			sb.WriteString(fmt.Sprintf("%s: %s\r\n", k, v))
-		}
+
+	// 2. Write the response headers synchronously.
+	if err := protocol.WriteHandshakeResponse(tcpConn, hdrs); err != nil {
+		tcpConn.Close()
+		return nil, fmt.Errorf("handshake write: %w", err)
 	}
-	sb.WriteString("\r\n")
-	if _, err := conn.Write([]byte(sb.String())); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("write handshake response: %w", err)
-	}
-	// Wrap the net.Conn in our zero-copy connTransport
-	tr := &connTransport{conn: conn, bufferPool: wsl.bufferPool}
+
+	// 3. Wrap the TCP connection in a zero-copy transport.
+	tr := &connTransport{conn: tcpConn, bufferPool: wsl.bufferPool}
+	// 4. Construct WSConnection; now ready for SendFrame/RecvBatch.
 	return protocol.NewWSConnection(tr, wsl.bufferPool, wsl.channelSize), nil
 }
 
-// Close shuts down the listener to stop Accept.
-// After Close, Accept returns ErrListenerClosed.
+// Close stops the listener; subsequent Accept calls return ErrListenerClosed.
 func (wsl *WebSocketListener) Close() error {
 	if wsl.closed {
 		return nil
@@ -92,53 +88,50 @@ func (wsl *WebSocketListener) Close() error {
 	return wsl.listener.Close()
 }
 
-// Addr returns the listener address.
+// Addr returns the listener's bound address.
 func (wsl *WebSocketListener) Addr() net.Addr {
 	return wsl.listener.Addr()
 }
 
-// connTransport is a zero-copy wrapper implementing api.Transport over net.Conn.
-// The Recv method no longer allocates intermediate []byte slices;
-// it reads directly into a pooled Buffer and returns it for zero-copy processing.
+// connTransport implements api.Transport by reading directly into pooled Buffers.
 type connTransport struct {
 	conn       net.Conn
 	bufferPool api.BufferPool
 	closed     bool
 }
 
-// Send writes each buffer in full directly to the connection.
-// No change here: buffers come from pool or framing logic.
+// Send writes each byte slice fully to the underlying connection.
 func (ct *connTransport) Send(buffers [][]byte) error {
 	if ct.closed {
 		return api.ErrTransportClosed
 	}
-	for _, buf := range buffers {
-		if _, err := ct.conn.Write(buf); err != nil {
-			return fmt.Errorf("write to connection: %w", err)
+	for _, b := range buffers {
+		if _, err := ct.conn.Write(b); err != nil {
+			return fmt.Errorf("write: %w", err)
 		}
 	}
 	return nil
 }
 
-// Recv performs zero-copy read: allocates a pooled Buffer, reads from conn
-// directly into the buffer's Bytes(), and returns the Buffer without copying.
+// Recv allocates a single pooled Buffer, reads into it, and returns its slice.
 func (ct *connTransport) Recv() ([][]byte, error) {
 	if ct.closed {
 		return nil, api.ErrTransportClosed
 	}
-	// Allocate a single buffer of default read size (e.g., 4096)
-	b := ct.bufferPool.Get(4096, -1)  // get pooled Buffer
-	n, err := ct.conn.Read(b.Bytes()) // read directly into pooled memory
+	buf := ct.bufferPool.Get(4096, -1)
+	data := buf.Bytes()
+	n, err := ct.conn.Read(data)
 	if err != nil {
-		b.Release()
-		return nil, fmt.Errorf("read from connection: %w", err)
+		buf.Release()
+		if err == io.EOF {
+			return nil, api.ErrTransportClosed
+		}
+		return nil, fmt.Errorf("read: %w", err)
 	}
-	// Return the slice of the buffer with only the valid bytes
-	// Note: we return b.Bytes()[:n]; the ownership of b remains with caller via bufferPool.
-	return [][]byte{b.Bytes()[:n]}, nil
+	return [][]byte{data[:n]}, nil
 }
 
-// Close marks the transport as closed and closes the underlying connection.
+// Close marks the transport closed and closes the TCP connection.
 func (ct *connTransport) Close() error {
 	if ct.closed {
 		return nil
@@ -147,12 +140,7 @@ func (ct *connTransport) Close() error {
 	return ct.conn.Close()
 }
 
-// Features reports the capabilities of this transport:
-// zero-copy at the application boundary (we read directly into pooled buffers).
+// Features advertises zero-copy and single-buffer (Batch=false) semantics.
 func (ct *connTransport) Features() api.TransportFeatures {
-	return api.TransportFeatures{
-		ZeroCopy:  true,
-		Batch:     false,
-		NUMAAware: false,
-	}
+	return api.TransportFeatures{ZeroCopy: true, Batch: false, NUMAAware: false}
 }

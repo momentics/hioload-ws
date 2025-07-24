@@ -5,7 +5,7 @@
 //
 // Cross-platform, NUMA-aware BufferPool manager for hioload-ws.
 // This file provides the BufferPoolManager type, allowing multiple buffer pools
-// segmented per NUMA node. Buffer pool channel capacity can be configured via 
+// segmented per NUMA node. Buffer pool channel capacity can be configured via
 // explicit constructors, providing memory locality and scaling for high-load systems.
 //
 // The BufferPoolManager is thread-safe, optimally reuses memory between connections,
@@ -28,9 +28,9 @@ import (
 // For maximal performance in NUMA environments, buffer allocation and reuse are kept as
 // local as possible. This reduces cache-misses and improves throughput under stress.
 type BufferPoolManager struct {
-	mu       sync.RWMutex          // Protects concurrent access to pools map.
+	mu       sync.RWMutex           // Protects concurrent access to pools map.
 	pools    map[int]api.BufferPool // Map NUMA node ID -> BufferPool instance.
-	capacity int                   // Used when creating new pools (channel cap per pool).
+	capacity int                    // Used when creating new pools (channel cap per pool).
 }
 
 // NewBufferPoolManager constructs a BufferPoolManager with the default capacity (1024).
@@ -45,7 +45,8 @@ func NewBufferPoolManager() *BufferPoolManager {
 
 // NewBufferPoolManagerWithCap constructs a BufferPoolManager with a custom channel capacity.
 // Allows advanced users to tune per-NUMA buffer pooling vs. memory pressure tradeoffs.
-//   cap - desired channel capacity for each pooled NUMA node.
+//
+//	cap - desired channel capacity for each pooled NUMA node.
 func NewBufferPoolManagerWithCap(cap int) *BufferPoolManager {
 	if cap < 1 {
 		cap = 1024

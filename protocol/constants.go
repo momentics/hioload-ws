@@ -23,15 +23,15 @@ const (
 	MaskBit = 0x80
 
 	// Close codes
-	CloseNormalClosure           = 1000
-	CloseGoingAway               = 1001
-	CloseProtocolError           = 1002
-	CloseUnsupportedData         = 1003
-	CloseNoStatusRcvd            = 1005
-	CloseAbnormalClosure         = 1006
-	CloseInvalidPayloadData      = 1007
-	ClosePolicyViolation         = 1008
-	CloseMessageTooBig           = 1009
-	CloseMissingExtension        = 1010
-	CloseInternalServerErr       = 1011
+	CloseNormalClosure      = 1000
+	CloseGoingAway          = 1001
+	CloseProtocolError      = 1002
+	CloseUnsupportedData    = 1003
+	CloseNoStatusRcvd       = 1005
+	CloseAbnormalClosure    = 1006
+	CloseInvalidPayloadData = 1007
+	ClosePolicyViolation    = 1008
+	CloseMessageTooBig      = 1009
+	CloseMissingExtension   = 1010
+	CloseInternalServerErr  = 1011
 )
