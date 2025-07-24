@@ -13,7 +13,7 @@ on:
 env:
   GO_VERSION: "1.23"
   GOEXPERIMENT: aliastypeparams
-  CGO_ENABLED: "0"        # Disable Cgo to use the no-Cgo stub
+  CGO_ENABLED: "1"        # Disable Cgo to use the no-Cgo stub
   GO111MODULE: "on"
 
 jobs:
@@ -24,7 +24,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     env:
-      CGO_ENABLED: "0"
+      CGO_ENABLED: "1"
       GOEXPERIMENT: aliastypeparams
     steps:
       - name: Checkout code
@@ -50,10 +50,10 @@ jobs:
             if [ -f "$dir/main.go" ]; then
               echo "Building example: $dir on ${{ matrix.os }}"
               if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-                CGO_ENABLED=0 GOOS=windows GOEXPERIMENT=aliastypeparams \
+                CGO_ENABLED=1 GOOS=windows GOEXPERIMENT=aliastypeparams \
                   go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
               else
-                CGO_ENABLED=0 GOOS=linux GOEXPERIMENT=aliastypeparams \
+                CGO_ENABLED=1 GOOS=linux GOEXPERIMENT=aliastypeparams \
                   go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
               fi
             fi
