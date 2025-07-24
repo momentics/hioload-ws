@@ -1,9 +1,9 @@
 # File: .github/workflows/build-examples.yml
-# Name: Build Examples (Linux & Windows)
+# Name: Build Examples (Windows Only)
 # Author: momentics <momentics@gmail.com>
-# License: Apache-2.0
+# License: Apache-.0
 
-name: Build Examples (Linux & Windows)
+name: Build Examples (Windows Only)
 
 on:
   push:
@@ -13,28 +13,19 @@ on:
 env:
   GO_VERSION: "1.23"
   GOEXPERIMENT: aliastypeparams
-  CGO_ENABLED: "1"        # Disable Cgo to use the no-Cgo stub
+  CGO_ENABLED: "1"
   GO111MODULE: "on"
 
 jobs:
-  build-examples:
-    name: Build Examples
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+  build-examples-windows:
+    name: Build Examples on Windows
+    runs-on: windows-latest
     env:
       CGO_ENABLED: "1"
       GOEXPERIMENT: aliastypeparams
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Install libnuma-dev on Linux
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libnuma-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -45,22 +36,17 @@ jobs:
         shell: bash
         working-directory: ./examples
         run: |
-          mkdir -p ../../dist/examples/${{ matrix.os }}
+          mkdir -p ../../dist/examples/windows-latest
           for dir in */; do
             if [ -f "$dir/main.go" ]; then
-              echo "Building example: $dir on ${{ matrix.os }}"
-              if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-                CGO_ENABLED=1 GOOS=windows GOEXPERIMENT=aliastypeparams \
-                  go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}.exe" "./$dir"
-              else
-                CGO_ENABLED=1 GOOS=linux GOEXPERIMENT=aliastypeparams \
-                  go build -o "../../dist/examples/${{ matrix.os }}/${dir%/}" "./$dir"
-              fi
+              echo "Building example: $dir on Windows"
+              CGO_ENABLED=1 GOOS=windows GOEXPERIMENT=aliastypeparams \
+                go build -o "../../dist/examples/windows-latest/${dir%/}.exe" "./$dir"
             fi
           done
 
       - name: Upload example binaries
         uses: actions/upload-artifact@v4
         with:
-          name: example-binaries-${{ matrix.os }}
-          path: dist/examples/${{ matrix.os }}/
+          name: example-binaries-windows
+          path: dist/examples/windows-latest/
