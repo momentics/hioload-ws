@@ -1,182 +1,129 @@
 // File: examples/broadcast/main.go
+// High-performance zero-copy WebSocket broadcast server using hioload-ws server façade.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
-//
-// High-performance WebSocket broadcast server using hioload-ws event-driven architecture.
-// Demonstrates NUMA-aware broadcast to all connected clients with zero-copy frames and handler chaining.
 
 package main
 
 import (
-	"errors"
 	"flag"
-	"fmt"
 	"log"
-	"os"
-	"os/signal"
 	"sync"
 	"sync/atomic"
-	"syscall"
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/internal/transport"
 	"github.com/momentics/hioload-ws/protocol"
 	"github.com/momentics/hioload-ws/server"
 )
 
-// BroadcastRegistry stores all currently connected clients for broadcasting.
-type BroadcastRegistry struct {
-	mu      sync.RWMutex
-	clients map[*protocol.WSConnection]string
-	count   int32
-}
-
-func NewBroadcastRegistry() *BroadcastRegistry {
-	return &BroadcastRegistry{
-		clients: make(map[*protocol.WSConnection]string),
-	}
-}
-
-func (r *BroadcastRegistry) Add(conn *protocol.WSConnection, clientID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.clients[conn] = clientID
-	atomic.AddInt32(&r.count, 1)
-	fmt.Printf("[registry] Client connected: %s\n", clientID)
-}
-
-func (r *BroadcastRegistry) Remove(conn *protocol.WSConnection) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if clientID, ok := r.clients[conn]; ok {
-		delete(r.clients, conn)
-		atomic.AddInt32(&r.count, -1)
-		fmt.Printf("[registry] Client disconnected: %s\n", clientID)
-	}
-}
-
-func (r *BroadcastRegistry) Broadcast(sender *protocol.WSConnection, data []byte, pool api.BufferPool) int {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	sent := 0
-	for client, name := range r.clients {
-		if client == sender {
-			continue
-		}
-
-		buf := pool.Get(len(data), -1)
-		copy(buf.Bytes(), data)
-
-		frame := &protocol.WSFrame{
-			IsFinal:    true,
-			Opcode:     protocol.OpcodeBinary,
-			PayloadLen: int64(len(data)),
-			Payload:    buf.Bytes(),
-		}
-
-		if err := client.SendFrame(frame); err != nil {
-			log.Printf("[broadcast] send error to %s: %v", name, err)
-		} else {
-			sent++
-		}
-
-		buf.Release()
-	}
-	return sent
-}
-
-func (r *BroadcastRegistry) Size() int {
-	return int(atomic.LoadInt32(&r.count))
-}
-
 func main() {
+	// Command-line flag for listen address
 	addr := flag.String("addr", ":9002", "WebSocket listen address")
 	flag.Parse()
 
+	// Create server configuration with default NUMA-aware buffer pooling
 	cfg := server.DefaultConfig()
 	cfg.ListenAddr = *addr
 
-	hioload, err := server.New(cfg)
+	// Initialize server facade
+	srv, err := server.NewServer(cfg)
 	if err != nil {
-		log.Fatalf("failed to initialize hioload-ws: %v", err)
+		log.Fatalf("server.NewServer error: %v", err)
 	}
-	if err := hioload.Start(); err != nil {
-		log.Fatalf("start failed: %v", err)
-	}
-	defer hioload.Stop()
+	defer srv.Shutdown()
 
-	log.Printf("[broadcast] Server running on %s", cfg.ListenAddr)
+	// Registry of active connections
+	var (
+		mu      sync.RWMutex
+		clients = make(map[*protocol.WSConnection]struct{})
+		count   int32
+	)
 
-	registry := NewBroadcastRegistry()
-	hioload.GetControl().RegisterDebugProbe("active_clients", func() any {
-		return registry.Size()
+	// Expose active client count via Control API
+	srv.GetControl().RegisterDebugProbe("active_clients", func() any {
+		return atomic.LoadInt32(&count)
 	})
 
-	bufPool := hioload.GetBufferPool() // Updated accessor
+	// Broadcast handler: logs message and broadcasts payload to all other clients
+	handler := adapters.HandlerFunc(func(data any) error {
+		buf := data.(api.Buffer)
+		payload := buf.Bytes()
+		log.Printf("Received message: %s", string(payload)) // print to console
+		buf.Release()
 
-	listener, err := transport.NewWebSocketListener(cfg.ListenAddr, bufPool, cfg.ChannelSize)
+		mu.RLock()
+		defer mu.RUnlock()
+		for conn := range clients {
+			// For each other client, send a copy
+			b2 := srv.GetBufferPool().Get(len(payload), -1)
+			copy(b2.Bytes(), payload)
+			frame := &protocol.WSFrame{
+				IsFinal:    true,
+				Opcode:     protocol.OpcodeBinary,
+				PayloadLen: int64(len(payload)),
+				Payload:    b2.Bytes(),
+			}
+			conn.SendFrame(frame)
+			b2.Release()
+		}
+		return nil
+	})
+
+	// Serve connections with our broadcast handler
+	go func() {
+		srv.Serve(handler)
+	}()
+
+	// Create low-level WebSocket listener
+	listener, err := srv.CreateWebSocketListener()
 	if err != nil {
-		log.Fatalf("failed to create listener: %v", err)
+		log.Fatalf("CreateWebSocketListener error: %v", err)
 	}
 	defer listener.Close()
 
-	acceptDone := make(chan struct{})
+	log.Printf("Broadcast server listening on %s", cfg.ListenAddr)
 
-	// Handle new connections and assign handler to broadcast
-	go func() {
-		defer close(acceptDone)
-		var connCounter int32
+	// Accept loop
+	for {
+		wsConn, err := listener.Accept()
+		if err != nil {
+			if err.Error() == "listener closed" {
+				break
+			}
+			log.Printf("Accept error: %v", err)
+			continue
+		}
 
-		for {
-			wsConn, err := listener.Accept()
-			if err != nil {
-				if errors.Is(err, transport.ErrListenerClosed) {
-					log.Println("[broadcast] Listener closed, exit loop")
+		// Register new connection
+		mu.Lock()
+		clients[wsConn] = struct{}{}
+		atomic.AddInt32(&count, 1)
+		mu.Unlock()
+		log.Printf("Client connected, total=%d", atomic.LoadInt32(&count))
+
+		// Start per-connection receive loop
+		go func(c *protocol.WSConnection) {
+			defer func() {
+				c.Close()
+				mu.Lock()
+				delete(clients, c)
+				atomic.AddInt32(&count, -1)
+				mu.Unlock()
+				log.Printf("Client disconnected, total=%d", atomic.LoadInt32(&count))
+			}()
+
+			for {
+				bufs, err := c.RecvZeroCopy()
+				if err != nil {
 					return
 				}
-				log.Printf("[broadcast] Accept error: %v", err)
-				continue
-			}
-
-			id := fmt.Sprintf("client-%d", atomic.AddInt32(&connCounter, 1))
-			registry.Add(wsConn, id)
-
-			// Define the broadcast logic: forward message to others
-			handler := adapters.HandlerFunc(func(data any) error {
-				msg, ok := data.([]byte)
-				if !ok {
-					return nil
+				for _, b := range bufs {
+					handler.Handle(b)
 				}
-				count := registry.Broadcast(wsConn, msg, bufPool)
-				log.Printf("[broadcast] %s → %d recipients", id, count)
-				return nil
-			})
+			}
+		}(wsConn)
+	}
 
-			mw := adapters.NewMiddlewareHandler(handler).
-				Use(adapters.LoggingMiddleware).
-				Use(adapters.RecoveryMiddleware).
-				Use(adapters.MetricsMiddleware(hioload.GetControl()))
-
-			wsConn.SetHandler(mw)
-			wsConn.Start()
-
-			go func(conn *protocol.WSConnection, cid string) {
-				<-conn.Done()
-				registry.Remove(conn)
-				log.Printf("[disconnect] %s disconnected", cid)
-			}(wsConn, id)
-		}
-	}()
-
-	// Graceful shutdown handler
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-
-	log.Println("[broadcast] Shutting down...")
-	listener.Close()
-	<-acceptDone
-	log.Println("[broadcast] Cleanup complete.")
+	log.Println("Broadcast server shutdown complete")
 }

@@ -10,6 +10,7 @@ package adapters
 import (
 	"github.com/momentics/hioload-ws/api"
 	"github.com/momentics/hioload-ws/internal/concurrency"
+	"github.com/momentics/hioload-ws/internal/normalize"
 )
 
 // AffinityAdapter implements api.Affinity by delegating to internal concurrency.
@@ -33,13 +34,10 @@ func NewAffinityAdapter() api.Affinity {
 // Pin binds the current OS thread to cpuID and/or numaID.
 // If cpuID or numaID is -1, a reasonable default is chosen.
 func (a *AffinityAdapter) Pin(cpuID, numaID int) error {
-	if cpuID < 0 {
-		cpuID = concurrency.PreferredCPUID(numaID)
-	}
-	if numaID < 0 {
-		numaID = concurrency.CurrentNUMANodeID()
-	}
-	if err := concurrency.PinCurrentThread(numaID, cpuID); err != nil {
+	node := normalize.NUMANodeAuto(numaID)
+	cpu := normalize.CPUIndexAuto(cpuID)
+
+	if err := concurrency.PinCurrentThread(node, cpu); err != nil {
 		return err
 	}
 	a.currentCPU = cpuID

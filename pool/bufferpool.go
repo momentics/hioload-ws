@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/internal/concurrency"
+	"github.com/momentics/hioload-ws/internal/normalize"
 )
 
 // Predefined (power-of-two) buffer size classes (bytes)
@@ -88,15 +88,9 @@ func NewBufferPoolManager(nodeCnt int) *BufferPoolManager {
 	}
 }
 
+// getPreferredNUMANode unified with normalize.NUMANodeAuto for all BufferPool allocations.
 func getPreferredNUMANode(numaPreferred int) int {
-	if numaPreferred >= 0 {
-		return numaPreferred
-	}
-	node := concurrency.CurrentNUMANodeID()
-	if node < 0 {
-		node = 0 // fallback
-	}
-	return node
+	return normalize.NUMANodeAuto(numaPreferred)
 }
 
 // GetPool returns a NUMA-aware BufferPool for the requested buffer size,
@@ -105,18 +99,6 @@ func (m *BufferPoolManager) GetPool(size, numaPreferred int) api.BufferPool {
 	node := getPreferredNUMANode(numaPreferred)
 	clz := sizeClassUpperBound(size)
 	return m.nodes[node].getOrCreatePool(clz)
-
-	//	node := normalizeNode(numaPreferred, m.nodeCnt)
-	//	clz := sizeClassUpperBound(size)
-	//	return m.nodes[node].getOrCreatePool(clz)
-}
-
-// normalizeNode bounds and normalizes the node index.
-func normalizeNode(pref, cnt int) int {
-	if pref < 0 || pref >= cnt {
-		return 0
-	}
-	return pref
 }
 
 // getOrCreatePool returns the subpool for a class, lazily allocating on first use.

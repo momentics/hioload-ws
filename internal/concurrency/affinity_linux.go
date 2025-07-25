@@ -12,12 +12,11 @@
 
 package concurrency
 
-/*
-#cgo LDFLAGS: -lnuma
-#include <numa.h>
-#include <sched.h>
-#include <pthread.h>
-*/
+// #define _GNU_SOURCE
+// #cgo LDFLAGS: -pthread -lnuma
+// #include <pthread.h>
+// #include <numa.h>
+// #include <sched.h>
 import "C"
 
 import (
@@ -28,7 +27,7 @@ import (
 // platformPreferredCPUID returns a suggested CPU core index for the given NUMA node.
 // If numaNode < 0 or NUMA is unavailable, falls back to CPU 0.
 func platformPreferredCPUID(numaNode int) int {
-	if numaNode < 0 || C.numa_available() < 0 {
+	if numaNode < 0 || C.numa_available < 0 {
 		return 0
 	}
 	total := runtime.NumCPU()
@@ -72,8 +71,8 @@ func platformPinCurrentThread(numaNode, cpuID int) error {
 
 	if cpuID >= 0 {
 		var mask C.cpu_set_t
-		C.CPU_ZERO(&mask)
-		C.CPU_SET(C.int(cpuID), &mask)
+		//C.CPU_ZERO(&mask)
+		//C.CPU_SET(C.int(cpuID), &mask)
 		if rc := C.pthread_setaffinity_np(C.pthread_self(), C.sizeof_cpu_set_t, &mask); rc != 0 {
 			return fmt.Errorf("pthread_setaffinity_np failed: %d", rc)
 		}

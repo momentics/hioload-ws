@@ -1,53 +1,67 @@
 // File: internal/transport/websocket_listener.go
-// package transport provides a native, zero-copy WebSocket listener.
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// We add a synchronous handshake phase so that Accept does not return
-// until the HTTP Upgrade has been fully processed. This ensures the
-// client’s first SendFrame actually reaches the server-side echo loop.
+// NUMA-aware, zero-copy, cross-platform WebSocketListener compatible with BufferPoolManager and
+// concurrency threading contracts. Uses explicit NUMA node via option, auto-detection fallback.
+//
+// Handles accept, handshake, and wraps connection in pooled zero-copy transport.
 
 package transport
 
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 
 	"github.com/momentics/hioload-ws/api"
+	"github.com/momentics/hioload-ws/internal/concurrency"
+	"github.com/momentics/hioload-ws/pool"
 	"github.com/momentics/hioload-ws/protocol"
 )
 
-// ErrListenerClosed is returned when Accept is called on a closed listener.
-var ErrListenerClosed = errors.New("listener closed")
+// ListenerOption allows config (NUMA node selection, pool override, etc).
+type ListenerOption func(*WebSocketListener)
 
-// WebSocketListener accepts raw TCP connections, performs the HTTP Upgrade
-// handshake synchronously, then returns a fully ready *protocol.WSConnection.
+// WithListenerNUMANode applies a specific NUMA node and associated buffer pool.
+// Reads NUMA nodes count from the concurrency module before constructing BufferPoolManager.
+func WithListenerNUMANode(node int) ListenerOption {
+	return func(wsl *WebSocketListener) {
+		numaCount := concurrency.NUMANodes()
+		wsl.numaNode = node
+		wsl.bufferPool = pool.NewBufferPoolManager(numaCount).GetPool(4096, node)
+	}
+}
+
+// WebSocketListener is a TCP->WebSocket handshake acceptor, NUMA-aware.
 type WebSocketListener struct {
 	listener    net.Listener
 	bufferPool  api.BufferPool
 	channelSize int
+	numaNode    int
 	closed      bool
 }
 
-// NewWebSocketListener initializes a TCP listener for WebSocket traffic.
-// channelSize dictates the size of the underlying WSConnection channels.
-func NewWebSocketListener(addr string, bufPool api.BufferPool, channelSize int) (*WebSocketListener, error) {
+// NewWebSocketListener binds TCP and configures NUMA-aware pools.
+func NewWebSocketListener(addr string, bufPool api.BufferPool, channelSize int, opts ...ListenerOption) (*WebSocketListener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", addr, err)
 	}
-	return &WebSocketListener{
+	wsl := &WebSocketListener{
 		listener:    ln,
 		bufferPool:  bufPool,
 		channelSize: channelSize,
-	}, nil
+		numaNode:    0,
+	}
+	for _, opt := range opts {
+		opt(wsl)
+	}
+	return wsl, nil
 }
 
-// Accept blocks until a raw TCP connection is accepted, then performs
-// the WebSocket handshake synchronously before returning the connection.
+// Accept TCP and perform strict WebSocket RFC6455 handshake.
 func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 	if wsl.closed {
 		return nil, ErrListenerClosed
@@ -59,27 +73,25 @@ func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 		}
 		return nil, err
 	}
-
-	// 1. Perform synchronous HTTP Upgrade handshake core.
 	hdrs, err := protocol.DoHandshakeCore(tcpConn)
 	if err != nil {
 		tcpConn.Close()
-		return nil, fmt.Errorf("handshake read: %w", err)
+		return nil, fmt.Errorf("handshake request failed: %w", err)
 	}
-
-	// 2. Write the response headers synchronously.
 	if err := protocol.WriteHandshakeResponse(tcpConn, hdrs); err != nil {
 		tcpConn.Close()
-		return nil, fmt.Errorf("handshake write: %w", err)
+		return nil, fmt.Errorf("handshake response failed: %w", err)
 	}
-
-	// 3. Wrap the TCP connection in a zero-copy transport.
-	tr := &connTransport{conn: tcpConn, bufferPool: wsl.bufferPool}
-	// 4. Construct WSConnection; now ready for SendFrame/RecvBatch.
-	return protocol.NewWSConnection(tr, wsl.bufferPool, wsl.channelSize), nil
+	tr := &connTransport{
+		conn:       tcpConn,
+		bufferPool: wsl.bufferPool,
+		numaNode:   wsl.numaNode,
+	}
+	wsConn := protocol.NewWSConnection(tr, wsl.bufferPool, wsl.channelSize)
+	return wsConn, nil
 }
 
-// Close stops the listener; subsequent Accept calls return ErrListenerClosed.
+// Close listener.
 func (wsl *WebSocketListener) Close() error {
 	if wsl.closed {
 		return nil
@@ -88,59 +100,52 @@ func (wsl *WebSocketListener) Close() error {
 	return wsl.listener.Close()
 }
 
-// Addr returns the listener's bound address.
-func (wsl *WebSocketListener) Addr() net.Addr {
-	return wsl.listener.Addr()
-}
+var ErrListenerClosed = errors.New("listener closed")
 
-// connTransport implements api.Transport by reading directly into pooled Buffers.
+// connTransport implements api.Transport over net.Conn, NUMA-aware and pooled.
 type connTransport struct {
 	conn       net.Conn
 	bufferPool api.BufferPool
+	numaNode   int
 	closed     bool
 }
 
-// Send writes each byte slice fully to the underlying connection.
-func (ct *connTransport) Send(buffers [][]byte) error {
-	if ct.closed {
+func (t *connTransport) Send(buffers [][]byte) error {
+	if t.closed {
 		return api.ErrTransportClosed
 	}
 	for _, b := range buffers {
-		if _, err := ct.conn.Write(b); err != nil {
+		if _, err := t.conn.Write(b); err != nil {
 			return fmt.Errorf("write: %w", err)
 		}
 	}
 	return nil
 }
-
-// Recv allocates a single pooled Buffer, reads into it, and returns its slice.
-func (ct *connTransport) Recv() ([][]byte, error) {
-	if ct.closed {
+func (t *connTransport) Recv() ([][]byte, error) {
+	if t.closed {
 		return nil, api.ErrTransportClosed
 	}
-	buf := ct.bufferPool.Get(4096, -1)
+	// Allocate buffer from concrete NUMA node pool.
+	buf := t.bufferPool.Get(4096, t.numaNode)
 	data := buf.Bytes()
-	n, err := ct.conn.Read(data)
+	n, err := t.conn.Read(data)
 	if err != nil {
 		buf.Release()
-		if err == io.EOF {
-			return nil, api.ErrTransportClosed
-		}
 		return nil, fmt.Errorf("read: %w", err)
 	}
 	return [][]byte{data[:n]}, nil
 }
-
-// Close marks the transport closed and closes the TCP connection.
-func (ct *connTransport) Close() error {
-	if ct.closed {
+func (t *connTransport) Close() error {
+	if t.closed {
 		return nil
 	}
-	ct.closed = true
-	return ct.conn.Close()
+	t.closed = true
+	return t.conn.Close()
 }
-
-// Features advertises zero-copy and single-buffer (Batch=false) semantics.
-func (ct *connTransport) Features() api.TransportFeatures {
-	return api.TransportFeatures{ZeroCopy: true, Batch: false, NUMAAware: false}
+func (t *connTransport) Features() api.TransportFeatures {
+	return api.TransportFeatures{
+		ZeroCopy:  true,
+		Batch:     false,
+		NUMAAware: true,
+	}
 }
