@@ -1,0 +1,69 @@
+# File: .github/workflows/build-examples.yml
+# Name: Build Examples (Windows Only)
+# Author: momentics <momentics@gmail.com>
+# License: Apache-.0
+
+name: Windows CGO Build (with MinGW-w64)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+env:
+  GO_VERSION: "1.23"
+  GOEXPERIMENT: aliastypeparams
+  CGO_ENABLED: "1"
+  GO111MODULE: "on"
+  GOOS: windows
+  GOARCH: amd64
+
+jobs:
+  build-windows:
+    name: Build on Windows with MinGW-w64 (CGO enabled)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-crt
+            mingw-w64-x86_64-headers
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-make
+
+      - name: Set up MinGW-w64 path for Go CGO
+        run: |
+          echo "C:\msys64\mingw64\bin" >> $GITHUB_PATH
+
+      - name: Build all examples (CGO, MinGW, amd64)
+        shell: bash
+        working-directory: ./examples
+        run: |
+          mkdir -p ../../dist/examples/windows-cgo
+          for dir in */; do
+            if [ -f "$dir/main.go" ]; then
+              echo "Building: $dir"
+              CGO_ENABLED=1 GOOS=windows GOEXPERIMENT=aliastypeparams \
+              CC=x86_64-w64-mingw32-gcc \
+              go build -v -o "../../dist/examples/windows-cgo/${dir%/}.exe" "./$dir"
+            fi
+          done
+
+      - name: Upload example binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: example-binaries-windows-cgo
+          path: dist/examples/windows-cgo/
