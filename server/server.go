@@ -1,120 +1,98 @@
+// File: server/server.go
+// Package server provides a high-performance, cross-platform WebSocket server facade
+// built on hioload-ws primitives: zero-copy,-IO, lock-free, NUMA-aware, etc.
+// Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
+
 package server
 
 import (
 	"errors"
-	"sync"
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
 	"github.com/momentics/hioload-ws/internal/concurrency"
 	"github.com/momentics/hioload-ws/internal/transport"
 	"github.com/momentics/hioload-ws/pool"
-	"github.com/momentics/hioload-ws/protocol"
 )
 
 var ErrAlreadyRunning = errors.New("server already running")
 
-// CreateWebSocketListener returns a NUMA-aware TCP→WebSocket listener
-// performing HTTP upgrade handshakes.
-func (s *Server) CreateWebSocketListener() (*transport.WebSocketListener, error) {
-	return transport.NewWebSocketListener(s.cfg.ListenAddr, s.pool, s.cfg.ChannelCapacity,
-		transport.WithListenerNUMANode(s.cfg.NUMANode))
+// Server is the unified facade encapsulating listener, reactor, executor, control, and buffer pool.
+type Server struct {
+	cfg        *Config        // server configuration (batch size, NUMA node, timeouts, etc.)
+	control    api.Control    // control adapter for hot-reload, debug probes, metrics
+	pool       api.BufferPool // zero-copy buffer pool per NUMA node
+	listener   *transport.WebSocketListener
+	poller     api.Poller
+	executor   api.Executor
+	middleware []Middleware
+	shutdownCh chan struct{}
 }
 
-// NewServer builds the Server facade.
+// NewServer constructs a Server facade with the given Config and options.
+// It initializes the buffer pool, control adapter, listener, reactor (poller), executor, and applies options.
 func NewServer(cfg *Config, opts ...ServerOption) (*Server, error) {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
 
-	// Создаём адаптер контроля
+	// 1. ControlAdapter for dynamic config, metrics, debug probes, hot-reload
 	ctrl := adapters.NewControlAdapter()
 
-	// Получаем число доступных NUMA-узлов
-	nodeCnt := concurrency.NUMANodes()
+	// 2. BufferPoolManager: one pool per NUMA node; choose preferred node or auto
+	nodeCount := concurrency.NUMANodes()
+	bufMgr := pool.NewBufferPoolManager(nodeCount)
+	bufPool := bufMgr.GetPool(cfg.IOBufferSize, cfg.NUMANode)
 
-	// Инициализируем менеджер пулов с указанием числа узлов
-	mgr := pool.NewBufferPoolManager(nodeCnt)
-
-	// Берём пул для заданного размера и узла
-	bufPool := mgr.GetPool(cfg.IOBufferSize, cfg.NUMANode)
-
-	listener, err := NewListener(cfg.ListenAddr, bufPool, cfg.ChannelCapacity, cfg.NUMANode)
+	// 3. WebSocket listener: zero‐copy buffers, per‐connection channels
+	wsListener, err := transport.NewWebSocketListener(
+		cfg.ListenAddr,
+		bufPool,
+		cfg.ChannelCapacity,
+		transport.WithListenerNUMANode(cfg.NUMANode),
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	s := &Server{
-		cfg:      cfg,
-		pool:     bufPool,
-		control:  ctrl,
-		listener: listener,
-		shutdown: make(chan struct{}),
-	}
-	for _, o := range opts {
-		o(s)
-	}
-	return s, nil
-}
+	// 4. PollerAdapter (Reactor): batch IO, lock-free rings
+	poller := adapters.NewPollerAdapter(cfg.BatchSize, cfg.ReactorRing)
 
-// Serve starts accepting and handling connections with the given Handler.
-func (s *Server) Serve(handler api.Handler, opts ...HandlerOption) error {
-	var once sync.Once
-	settings := &handlerSettings{}
-	for _, o := range opts {
-		o(settings)
+	// 5. ExecutorAdapter: lock-free task dispatch, NUMA-aware
+	executor := adapters.NewExecutorAdapter(cfg.ExecutorWorkers, cfg.NUMANode)
+
+	srv := &Server{
+		cfg:        cfg,
+		control:    ctrl,
+		pool:       bufPool,
+		listener:   wsListener,
+		poller:     poller,
+		executor:   executor,
+		shutdownCh: make(chan struct{}),
 	}
 
-	go func() {
-		for {
-			select {
-			case <-s.shutdown:
-				return
-			default:
-			}
-			ws, err := s.listener.Accept()
-			if err != nil {
-				continue
-			}
-			// wrap with middleware chain
-			h := handler
-			for i := len(settings.middleware) - 1; i >= 0; i-- {
-				h = settings.middleware[i](h)
-			}
-			go func(cConn *protocol.WSConnection) {
-				defer cConn.Close()
-				for {
-					bufs, err := cConn.RecvZeroCopy()
-					if err != nil {
-						return
-					}
-					for _, buf := range bufs {
-						h.Handle(buf)
-						buf.Release()
-					}
-				}
-			}(ws)
-		}
-	}()
+	// 6. Apply functional options (middleware, affinity, etc.)
+	for _, opt := range opts {
+		opt(srv)
+	}
 
-	once.Do(func() {}) // placeholder
-
-	<-s.shutdown
-	return nil
+	return srv, nil
 }
 
-// Shutdown signals Serve to stop accepting new connections.
-func (s *Server) Shutdown() error {
-	close(s.shutdown)
-	return s.listener.Close()
+func (s *Server) UseMiddleware(mw ...Middleware) {
+    s.middleware = append(s.middleware, mw...)
 }
 
-// GetControl exposes runtime metrics and debug control.
+// GetControl returns the ControlAdapter instance.
+// Through this, users can register debug probes, query metrics, and perform hot-reload.
 func (s *Server) GetControl() api.Control {
 	return s.control
 }
 
-// GetBufferPool returns the server's NUMA-aware buffer pool.
+// GetBufferPool returns the zero-copy BufferPool.
+// Consumers can allocate and release Buffer objects without allocations,
+// maintaining NUMA locality and high throughput.
 func (s *Server) GetBufferPool() api.BufferPool {
 	return s.pool
 }

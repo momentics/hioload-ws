@@ -1,25 +1,39 @@
+// File: server/options.go
+// Package server defines functional options for the Server facade.
+// Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
+
 package server
 
-import (
-	"github.com/momentics/hioload-ws/api"
-)
+import "github.com/momentics/hioload-ws/api"
 
-// HandlerOption customizes per-connection handling.
-type HandlerOption func(*handlerSettings)
+// ServerOption customizes server initialization.
+type ServerOption func(*Server)
 
-type handlerSettings struct {
-	middleware []Middleware
-}
-
-// Middleware processes each incoming Buffer before the user Handler.
-type Middleware func(api.Handler) api.Handler
-
-// WithMiddleware adds middleware in FIFO order.
-func WithMiddleware(mw ...Middleware) HandlerOption {
-	return func(h *handlerSettings) {
-		h.middleware = append(h.middleware, mw...)
+// WithMiddleware attaches middleware in FIFO order.
+func WithMiddleware(mw ...Middleware) ServerOption {
+	return func(s *Server) {
+		s.middleware = append(s.middleware, mw...)
 	}
 }
 
-// ServerOption customizes Server behavior on creation.
-type ServerOption func(*Server)
+// WithAffinityScope sets CPU/NUMA binding scope for reactor and executor.
+func WithAffinityScope(scope api.AffinityScope) ServerOption {
+	return func(s *Server) {
+		s.cfg.AffinityScope = scope
+	}
+}
+
+// WithBatchSize overrides default reactor batch size.
+func WithBatchSize(batch int) ServerOption {
+	return func(s *Server) {
+		s.cfg.BatchSize = batch
+	}
+}
+
+// WithExecutorWorkers sets the number of background worker goroutines.
+func WithExecutorWorkers(n int) ServerOption {
+	return func(s *Server) {
+		s.cfg.ExecutorWorkers = n
+	}
+}

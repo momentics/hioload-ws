@@ -74,7 +74,7 @@ func RecoveryMiddleware(next api.Handler) api.Handler {
 }
 
 // MetricsMiddleware increments the "handler.processed" counter in Control stats.
-func MetricsMiddleware(control api.Control) func(api.Handler) api.Handler {
+func HandlerMetricsMiddleware(control api.Control) func(api.Handler) api.Handler {
 	return func(next api.Handler) api.Handler {
 		return HandlerFunc(func(data any) error {
 			stats := control.Stats()
@@ -82,6 +82,7 @@ func MetricsMiddleware(control api.Control) func(api.Handler) api.Handler {
 			control.SetConfig(map[string]any{
 				"handler.processed": count + 1,
 			})
+			// Call the next handler in the chain
 			return next.Handle(data)
 		})
 	}

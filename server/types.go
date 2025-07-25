@@ -1,23 +1,33 @@
+// File: server/types.go
+// Package server defines high-level Server API and configuration.
+// Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
+
 package server
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/momentics/hioload-ws/api"
 )
 
-// Config holds all server-side configuration parameters.
+// Config holds all server parameters for high-performance WebSocket service.
 type Config struct {
-	ListenAddr      string        // TCP bind address, e.g. ":9000"
-	IOBufferSize    int           // size of zero-copy I/O buffers
-	ChannelCapacity int           // capacity of each WSConnection channel
-	NUMANode        int           // preferred NUMA node (-1 = auto)
-	ReadTimeout     time.Duration // optional per-connection read deadline
-	WriteTimeout    time.Duration // optional per-connection write deadline
-	ShutdownTimeout time.Duration // graceful shutdown timeout
+	ListenAddr      string            // ":port"
+	IOBufferSize    int               // size of zero-copy buffers
+	ChannelCapacity int               // capacity of per-connection frame channels
+	NUMANode        int               // preferred NUMA node (-1 = auto)
+	ReadTimeout     time.Duration     // optional read deadline
+	WriteTimeout    time.Duration     // optional write deadline
+	BatchSize       int               // number of events per reactor batch
+	ReactorRing     int               // capacity of reactor ring buffer
+	ExecutorWorkers int               // number of executor workers
+	AffinityScope   api.AffinityScope // CPU/NUMA binding scope
+	ShutdownTimeout time.Duration     // graceful shutdown wait time
 }
 
-// DefaultConfig returns sensible defaults.
+// DefaultConfig returns safe defaults optimized for throughput and latency.
 func DefaultConfig() *Config {
 	return &Config{
 		ListenAddr:      ":9000",
@@ -26,15 +36,10 @@ func DefaultConfig() *Config {
 		NUMANode:        -1,
 		ReadTimeout:     0,
 		WriteTimeout:    0,
+		BatchSize:       32,
+		ReactorRing:     1024,
+		ExecutorWorkers: runtime.NumCPU(),
+		AffinityScope:   api.ScopeThread,
 		ShutdownTimeout: 30 * time.Second,
 	}
-}
-
-// Server is the high-level façade encapsulating listener, pool, and control.
-type Server struct {
-	cfg      *Config
-	pool     api.BufferPool
-	control  api.Control
-	listener *Listener
-	shutdown chan struct{}
 }

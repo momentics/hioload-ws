@@ -9,6 +9,10 @@
 
 package api
 
+import (
+	"context"
+)
+
 // Context provides a lightweight key-value store with explicit propagation semantics.
 type Context interface {
 	// Set assigns a value for a key, optionally marking it as propagated.
@@ -25,4 +29,29 @@ type Context interface {
 	IsPropagated(key string) bool
 	// Keys returns all present keys.
 	Keys() []string
+}
+
+type contextKey string
+
+const connectionKey contextKey = "hioload-ws-connection"
+
+// ContextWithConnection returns a new context containing the given connection.
+func ContextWithConnection(ctx context.Context, conn any) context.Context {
+	return context.WithValue(ctx, connectionKey, conn)
+}
+
+// ContextFromData extracts the context from handler data.
+// It expects data to wrap a context, for example via ContextualHandler.
+func ContextFromData(data any) context.Context {
+	// If data implements interface{ Ctx() context.Context }, use that.
+	if withCtx, ok := data.(interface{ Ctx() context.Context }); ok {
+		return withCtx.Ctx()
+	}
+	// Fallback to background context.
+	return context.Background()
+}
+
+// FromContext retrieves the connection stored in context.
+func FromContext(ctx context.Context) any {
+	return ctx.Value(connectionKey)
 }
