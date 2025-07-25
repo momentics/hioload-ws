@@ -1,19 +1,13 @@
-# File: .github/workflows/release.yml
-# Workflow для публикации релизов hioload-ws через GoReleaser
-#
-# Author: momentics <momentics@gmail.com>
-# License: Apache-2.0
-
 name: Release
 
 on:
   push:
     tags:
-      - 'v*.*.*'   # семантические теги вида v1.2.3
+      - 'v*.*.*'
 
 permissions:
-  contents: write   # требуется для создания Release
-  packages: write   # если публикуются пакеты
+  contents: write
+  packages: write
 
 jobs:
   release:
@@ -31,7 +25,6 @@ jobs:
           check-latest: true
 
       - name: Install GoReleaser
-        # Исправлено: правильный путь к Action
         uses: goreleaser/goreleaser-action@v3
         with:
           version: latest
@@ -40,7 +33,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Создать GitHub Release, собрать артефакты и опубликовать
           goreleaser release --rm-dist
 
       - name: Trigger pkg.go.dev re-index
@@ -52,4 +44,4 @@ jobs:
 
       - name: Verify pkg.go.dev indexing
         run: |
-          echo "Проверьте https://pkg.go.dev/github.com/momentics/hioload-ws для обновленной документации."
+          echo "Check https://pkg.go.dev/github.com/momentics/hioload-ws for updated documentation."
