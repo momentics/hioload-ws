@@ -2,7 +2,7 @@
 
 **Сверхпроизводительная NUMA-aware Zero-Copy Batch-IO, Lock-free WebSocket библиотека на Go**
 
-[![Build Examples (Linux & Windows)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml/badge.svg?branch=main)](https://github.com/momentics/hioload-ws/actions/workflows/lint-build-examples.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/momentics/hioload-ws)](https://goreportcard.com/report/github.com/momentics/hioload-ws) [![pkg.go.dev](https://pkg.go.dev/badge/github.com/momentics/hioload-ws)](https://pkg.go.dev/github.com/momentics/hioload-ws) [![Release](https://img.shields.io/github/v/release/momentics/hioload-ws)](https://github.com/momentics/hioload-ws/releases) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Dependencies](https://img.shields.io/librariesio/release/github/momentics/hioload-ws)](https://github.com/momentics/hioload-ws/pulls?utf8=%E2%9C%93&q=is%3Apr+label%3Adeps)
+[![Go Report Card](https://goreportcard.com/badge/github.com/momentics/hioload-ws)](https://goreportcard.com/report/github.com/momentics/hioload-ws) [![pkg.go.dev](https://pkg.go.dev/badge/github.com/momentics/hioload-ws)](https://pkg.go.dev/github.com/momentics/hioload-ws) [![Release](https://img.shields.io/github/v/release/momentics/hioload-ws)](https://github.com/momentics/hioload-ws/releases) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Dependencies](https://img.shields.io/librariesio/release/github/momentics/hioload-ws)](https://github.com/momentics/hioload-ws/pulls?utf8=%E2%9C%93&q=is%3Apr+label%3Adeps)
 
 
 | ![hioload-ws sponsors](image.png) | **Уважаемые спонсоры!** <br><br>Мы ищем партнёров для предоставления ультра-мощного тестового окружения в Москве для стресс-тестирования hioload-ws — WebSocket-библиотеки с микросекундным уровнем end-to-end задержки на экстремальных нагрузках.<br>Если ваша инфраструктура способна обеспечить миллионы конкурентных соединений и эффективный мониторинг p99 латентности — напишите нам для сотрудничества!<br><br>**Контакт:** momentics@gmail.com |
@@ -291,3 +291,4 @@ A: В каталоге `/examples/` и обширных комментариях
 ---
 
 **Для юридических и технических подробностей см. [LICENSE](./LICENSE) и [NOTICE](./NOTICE) в корне репозитория.**
+
