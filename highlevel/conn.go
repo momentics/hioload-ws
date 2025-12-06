@@ -443,6 +443,23 @@ func (c *Conn) AllParams() map[string]string {
 	return result
 }
 
+// ReadString reads a UTF-8 string message from the connection.
+func (c *Conn) ReadString() (string, error) {
+	_, payload, err := c.readMessage()
+	if err != nil {
+		return "", err
+	}
+
+	// Convert the payload to a string
+	return string(payload), nil
+}
+
+// WriteString sends a UTF-8 string message over the connection.
+func (c *Conn) WriteString(s string) error {
+	// Use WriteMessage to send as text
+	return c.WriteMessage(int(TextMessage), []byte(s))
+}
+
 // LocalAddr returns the local network address.
 func (c *Conn) LocalAddr() string {
 	// Placeholder - would return actual local address

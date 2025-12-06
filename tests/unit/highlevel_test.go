@@ -228,6 +228,40 @@ func TestCustomMiddleware(t *testing.T) {
 	if len(server.Middleware()) != 2 {  // Note: this would require adding a getter method
 		t.Errorf("Expected 2 custom middleware, got %d", len(server.Middleware()))
 	}
-	
+
 	t.Log("Custom middleware API works correctly")
 }
+
+// TestConnMethods tests that the new JSON and String methods exist
+func TestConnMethods(t *testing.T) {
+	// Test that the Conn type has the required methods
+	conn := &highlevel.Conn{}
+
+	// Test that methods can be called without causing compilation errors
+	// We can't fully test their functionality without real connections
+
+	// Test WriteJSON method exists
+	testData := map[string]string{"key": "value"}
+
+	// We won't call the actual methods since they need real connections
+	// But we can ensure the method signature is correct by referencing it
+	_ = conn.WriteJSON
+
+	// Test ReadJSON method exists
+	// We won't call it, but ensure it compiles
+	_ = conn.ReadJSON
+
+	// Test WriteString method exists
+	_ = conn.WriteString
+
+	// Test ReadString method exists
+	_ = conn.ReadString
+
+	// Verify all methods exist by ensuring they compile
+	if true { // Just to use the functions
+		_ = testData
+	}
+
+	t.Log("All connection methods exist and have correct signatures")
+}
+

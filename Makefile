@@ -127,3 +127,6 @@ build-built-in-middleware-example:
 
 build-custom-middleware-example:
 	$(GOBUILD) ./examples/highlevel/custom_middleware/
+
+build-json-string-methods-example:
+	$(GOBUILD) ./examples/highlevel/json_string_methods/
