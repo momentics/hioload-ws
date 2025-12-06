@@ -36,6 +36,9 @@ type RouteHandler struct {
 	Methods []HTTPMethod
 }
 
+// Middleware is a function that can intercept and process a connection before passing it to the next handler
+type Middleware func(next func(*Conn)) func(*Conn)
+
 // RouteGroup represents a group of routes with common prefix
 type RouteGroup struct {
 	server *Server
@@ -64,6 +67,8 @@ type Server struct {
 	routePatterns map[string][]string  // maps pattern to parameter names
 	// Store allowed methods for each pattern (for error responses)
 	patternMethods map[*regexp.Regexp][]HTTPMethod
+	// Middleware chain
+	middleware []Middleware
 }
 
 // NewServer creates a new high-level WebSocket server.
@@ -80,6 +85,7 @@ func NewServer(addr string) *Server {
 		patterns:       make(map[*regexp.Regexp]*RouteHandler),
 		routePatterns:  make(map[string][]string),
 		patternMethods: make(map[*regexp.Regexp][]HTTPMethod),
+		middleware:     make([]Middleware, 0),
 	}
 }
 
@@ -164,6 +170,13 @@ func (s *Server) TRACE(pattern string, handler func(*Conn)) {
 	s.HandleFuncWithMethods(pattern, []HTTPMethod{TRACE}, handler)
 }
 
+// Use adds middleware to the server's middleware chain.
+func (s *Server) Use(middleware ...Middleware) {
+	s.handlerMux.Lock()
+	defer s.handlerMux.Unlock()
+	s.middleware = append(s.middleware, middleware...)
+}
+
 // Group creates a new route group with the given prefix.
 func (s *Server) Group(prefix string) *RouteGroup {
 	return &RouteGroup{
@@ -231,6 +244,11 @@ func (g *RouteGroup) Group(prefix string) *RouteGroup {
 	}
 }
 
+// Use adds middleware to the group's server.
+func (g *RouteGroup) Use(middleware ...Middleware) {
+	g.server.Use(middleware...)
+}
+
 // joinPrefix joins the group prefix with the pattern
 func (g *RouteGroup) joinPrefix(pattern string) string {
 	if g.prefix == "" {
@@ -248,6 +266,15 @@ func (g *RouteGroup) joinPrefix(pattern string) string {
 	}
 
 	return result + pattern
+}
+
+// applyMiddleware applies the middleware chain to a handler function
+func (s *Server) applyMiddleware(handler func(*Conn)) func(*Conn) {
+	// Apply middleware in reverse order to create proper chain (last middleware executes first)
+	for i := len(s.middleware) - 1; i >= 0; i-- {
+		handler = s.middleware[i](handler)
+	}
+	return handler
 }
 
 // containsParam checks if a pattern contains parameter placeholders (e.g., :id)
@@ -411,7 +438,9 @@ func (s *Server) ListenAndServe() error {
 					pool := s.underlying.GetBufferPool()
 					hlConn := newConnWithParams(wsConn, pool, params)
 
-					routeHandler.Handler(hlConn)
+					// Apply middleware chain to the handler
+					finalHandler := s.applyMiddleware(routeHandler.Handler)
+					finalHandler(hlConn)
 				} else {
 					// No handler found, close connection or return error
 					// Create a basic connection just to close it

@@ -91,3 +91,69 @@ func TestRouteGroups(t *testing.T) {
 	// The test is just to ensure no panics occur during registration
 	t.Log("Route groups registered successfully")
 }
+
+func TestMiddleware(t *testing.T) {
+	server := NewServer(":0")
+
+	// Test middleware registration
+	executionOrder := []string{}
+
+	// First middleware
+	middleware1 := func(next func(*Conn)) func(*Conn) {
+		return func(conn *Conn) {
+			executionOrder = append(executionOrder, "middleware1_start")
+			next(conn)
+			executionOrder = append(executionOrder, "middleware1_end")
+		}
+	}
+
+	// Second middleware
+	middleware2 := func(next func(*Conn)) func(*Conn) {
+		return func(conn *Conn) {
+			executionOrder = append(executionOrder, "middleware2_start")
+			next(conn)
+			executionOrder = append(executionOrder, "middleware2_end")
+		}
+	}
+
+	// Register middleware
+	server.Use(middleware1, middleware2)
+
+	// Create a test handler
+	handler := func(conn *Conn) {
+		executionOrder = append(executionOrder, "handler")
+	}
+
+	// Register a handler to test the chain
+	server.GET("/test", handler)
+
+	// Verify that middleware and handler functions are registered
+	if len(server.middleware) != 2 {
+		t.Errorf("Expected 2 middleware, got %d", len(server.middleware))
+	}
+
+	// The test is just to ensure no panics occur during registration and middleware application
+	t.Log("Middleware registered successfully")
+}
+
+func TestGroupMiddleware(t *testing.T) {
+	server := NewServer(":0")
+
+	// Test that group Use method works
+	apiV1 := server.Group("/api/v1")
+
+	middleware := func(next func(*Conn)) func(*Conn) {
+		return func(conn *Conn) {
+			next(conn)
+		}
+	}
+
+	// This should add middleware to the server (since group middleware affects the parent server)
+	apiV1.Use(middleware)
+
+	if len(server.middleware) != 1 {
+		t.Errorf("Expected 1 middleware from group, got %d", len(server.middleware))
+	}
+
+	t.Log("Group middleware registered successfully")
+}

@@ -118,3 +118,6 @@ build-http-methods-example:
 
 build-route-groups-example:
 	$(GOBUILD) ./examples/highlevel/route_groups/
+
+build-middleware-example:
+	$(GOBUILD) ./examples/highlevel/middleware/
