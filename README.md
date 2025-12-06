@@ -203,7 +203,7 @@ go test ./...
 
 ```
 
-go run ./examples/echo/main.go
+go run ./examples/lowlevel/echo/main.go
 
 # Connect with any ws-compatible client (browser, wscat, websocat, etc.)
 

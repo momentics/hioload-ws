@@ -12,9 +12,9 @@ import (
 )
 
 // TestContextWithTimeout creates a context with timeout for tests.
-func TestContextWithTimeout(timeout time.Duration) context.Context {
-	ctx, _ := context.WithTimeout(context.Background(), timeout)
-	return ctx
+// Returns context and cancel function - caller should handle cancellation appropriately.
+func TestContextWithTimeout(timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 // FakeEvent implements api.Event for testing.

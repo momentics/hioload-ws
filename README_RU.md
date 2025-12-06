@@ -220,7 +220,7 @@ git clone https://github.com/momentics/hioload-ws.git
 cd hioload-ws
 go mod tidy
 go test ./...
-go run ./examples/echo/main.go
+go run ./examples/lowlevel/echo/main.go
 
 ```
 

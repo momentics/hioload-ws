@@ -12,11 +12,71 @@
 *.so
 *.dylib
 
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool, specifically when used with LiteIDE
+# Binaries built from Go projects
+*.binary
+*.bin
 *.out
+*.app
+*.run
+
+# Go build artifacts
+*.test
+*.prof
+*.trace
+
+# Common binary names from examples/binaries
+broadcast
+echo
+hioload-echo
+hioload-broadcast
+hioload-test
+hioload-client
+hioload-server
+hioload-example
+
+# Build artifacts directory
+bin/
+dist/
+_build/
+output/
+artifacts/
+
+# Temporary build files
+*.tmp
+*.temp
+*~
+
+# Platform-specific binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.out
+*.app
+*.bin
+*.binary
+*.run
+
+# Coverage files
+coverage.out
+coverage.html
+cover.out
+*.html
+
+# Profiling files
+*.prof
+*.trace
+*.svg
+
+# Build artifacts
+*.pb.go
+*.pb.gw.go
+*_generated.go
+
+# Go test artifacts
+test-results/
+*.test
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
