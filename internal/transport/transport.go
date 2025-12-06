@@ -41,6 +41,11 @@ func (f *TransportFactory) Create() (api.Transport, error) {
 	return &safeWrapper{impl: impl}, nil
 }
 
+// newTransportInternal is a platform-specific factory function for creating transports.
+// On Linux with io_uring support, it creates io_uring transport.
+// On Linux without io_uring support, it falls back to epoll-based transport.
+// This function is implemented in platform-specific files.
+
 // safeWrapper synchronizes all external api.Transport calls, making transport thread-safe.
 // This does not serialize I/O inside the transport but only API visibility.
 type safeWrapper struct {

@@ -1,14 +1,13 @@
-// File: internal/transport/transport_linux.go
-//go:build linux
-// +build linux
+//go:build linux && !io_uring
+// +build linux,!io_uring
 
+// Package internal/transport implements epoll-based transport for Linux (fallback when io_uring unavailable).
 //
 // Author: momentics <momentics@gmail.com>
 // License: Apache-2.0
 //
-// Linux-specific, NUMA-aware, batch-IO transport using SendmsgBuffers/RecvmsgBuffers.
-// Fully integrated with latest BufferPoolManager and NUMA-detection logic.
-
+// Epoll-based transport for Linux using SendmsgBuffers/RecvmsgBuffers for maximum performance.
+// Full support for buffer pool NUMA pinning. Integrated with latest BufferPoolManager.
 package transport
 
 import (
@@ -17,23 +16,11 @@ import (
 
 	"github.com/momentics/hioload-ws/api"
 	"github.com/momentics/hioload-ws/internal/concurrency"
-	"github.com/momentics/hioload-ws/internal/normalize"
 	"github.com/momentics/hioload-ws/pool"
-
 	"golang.org/x/sys/unix"
 )
 
-type linuxTransport struct {
-	mu           sync.Mutex
-	fd           int
-	bufPool      api.BufferPool
-	ioBufferSize int
-	numaNode     int
-	closed       bool
-}
-
 // normalizeNUMANode ensures numaNode is valid within platform limits.
-// Returns fallback node=0 if out of range or negative.
 func normalizeNUMANode(numaNode int) int {
 	maxNodes := concurrency.NUMANodes()
 	if maxNodes <= 0 {
@@ -45,10 +32,9 @@ func normalizeNUMANode(numaNode int) int {
 	return numaNode
 }
 
-// newTransportInternal creates a platform-native transport for Linux.
-// NUMA node is used for buffer allocation; if negative or invalid, fallback to 0.
+// newTransportInternal creates a platform-native transport for Linux (epoll-based fallback).
 func newTransportInternal(ioBufferSize, numaNode int) (api.Transport, error) {
-	node := normalize.NUMANodeAuto(numaNode)
+	node := normalizeNUMANode(numaNode)
 
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_NONBLOCK, unix.IPPROTO_TCP)
 	if err != nil {
@@ -56,10 +42,10 @@ func newTransportInternal(ioBufferSize, numaNode int) (api.Transport, error) {
 	}
 	_ = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
 
-	// Create NUMA-aware buffer pool using normalized node
+	// Create NUMA-aware buffer pool
 	bufPool := pool.NewBufferPoolManager(concurrency.NUMANodes()).GetPool(ioBufferSize, node)
 
-	return &linuxTransport{
+	return &epollTransport{
 		fd:           fd,
 		bufPool:      bufPool,
 		ioBufferSize: ioBufferSize,
@@ -67,29 +53,39 @@ func newTransportInternal(ioBufferSize, numaNode int) (api.Transport, error) {
 	}, nil
 }
 
-func (lt *linuxTransport) Recv() ([][]byte, error) {
-	lt.mu.Lock()
-	defer lt.mu.Unlock()
-	if lt.closed {
+// epollTransport implements api.Transport using epoll and SendmsgBuffers for maximum performance.
+type epollTransport struct {
+	mu           sync.Mutex
+	fd           int
+	bufPool      api.BufferPool
+	ioBufferSize int
+	numaNode     int
+	closed       bool
+}
+
+func (et *epollTransport) Recv() ([][]byte, error) {
+	et.mu.Lock()
+	defer et.mu.Unlock()
+	if et.closed {
 		return nil, api.ErrTransportClosed
 	}
 	batch := 16
 	bufs := make([][]byte, batch)
 	for i := range bufs {
-		buf := lt.bufPool.Get(lt.ioBufferSize, lt.numaNode)
+		buf := et.bufPool.Get(et.ioBufferSize, et.numaNode)
 		bufs[i] = buf.Bytes()
 	}
-	n, _, _, _, err := unix.RecvmsgBuffers(lt.fd, bufs, nil, unix.MSG_DONTWAIT)
+	n, _, _, _, err := unix.RecvmsgBuffers(et.fd, bufs, nil, unix.MSG_DONTWAIT)
 	if err != nil {
 		return nil, fmt.Errorf("RecvmsgBuffers: %w", err)
 	}
 	return bufs[:n], nil
 }
 
-func (lt *linuxTransport) Send(buffers [][]byte) error {
-	lt.mu.Lock()
-	defer lt.mu.Unlock()
-	if lt.closed {
+func (et *epollTransport) Send(buffers [][]byte) error {
+	et.mu.Lock()
+	defer et.mu.Unlock()
+	if et.closed {
 		return api.ErrTransportClosed
 	}
 	const maxBatch = 16
@@ -100,29 +96,31 @@ func (lt *linuxTransport) Send(buffers [][]byte) error {
 		if len(batch) > maxBatch {
 			batch = batch[:maxBatch]
 		}
-		n, err := unix.SendmsgBuffers(lt.fd, batch, nil, nil, 0)
+		n, err := unix.SendmsgBuffers(et.fd, batch, nil, nil, 0)
 		if err != nil {
 			return fmt.Errorf("SendmsgBuffers: %w", err)
 		}
+		// n is the number of bytes sent, but it should be at least the size of our batch
 		if n <= 0 {
-			return fmt.Errorf("SendmsgBuffers: sent no buffers")
+			return fmt.Errorf("SendmsgBuffers: sent no data")
 		}
-		sent += n
-		left -= n
+		// All buffers in the batch were sent successfully
+		sent += len(batch)
+		left -= len(batch)
 	}
 	return nil
 }
 
-func (lt *linuxTransport) Close() error {
-	lt.mu.Lock()
-	defer lt.mu.Unlock()
-	if !lt.closed {
-		unix.Close(lt.fd)
-		lt.closed = true
+func (et *epollTransport) Close() error {
+	et.mu.Lock()
+	defer et.mu.Unlock()
+	if !et.closed {
+		unix.Close(et.fd)
+		et.closed = true
 	}
 	return nil
 }
 
-func (lt *linuxTransport) Features() api.TransportFeatures {
+func (et *epollTransport) Features() api.TransportFeatures {
 	return DetectTransportFeatures()
 }

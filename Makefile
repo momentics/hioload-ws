@@ -130,3 +130,16 @@ build-custom-middleware-example:
 
 build-json-string-methods-example:
 	$(GOBUILD) ./examples/highlevel/json_string_methods/
+
+build-param-routing-example:
+	$(GOBUILD) ./examples/highlevel/param_routing/
+
+# io_uring related targets
+test-io-uring:
+	$(GOTEST) -tags io_uring -v ./internal/transport/...
+
+build-with-uring:
+	CGO_ENABLED=1 go build -tags io_uring -v ./...
+
+build-without-uring:
+	CGO_ENABLED=1 go build -tags '!io_uring' -v ./...
