@@ -36,6 +36,12 @@ type RouteHandler struct {
 	Methods []HTTPMethod
 }
 
+// RouteGroup represents a group of routes with common prefix
+type RouteGroup struct {
+	server *Server
+	prefix string
+}
+
 // Server wraps the low-level server with a high-level API.
 type Server struct {
 	addr       string
@@ -156,6 +162,92 @@ func (s *Server) OPTIONS(pattern string, handler func(*Conn)) {
 // TRACE registers a handler for TRACE method on the specified pattern.
 func (s *Server) TRACE(pattern string, handler func(*Conn)) {
 	s.HandleFuncWithMethods(pattern, []HTTPMethod{TRACE}, handler)
+}
+
+// Group creates a new route group with the given prefix.
+func (s *Server) Group(prefix string) *RouteGroup {
+	return &RouteGroup{
+		server: s,
+		prefix: prefix,
+	}
+}
+
+// Group methods - all routes registered on the group will have the prefix prepended
+// GET registers a handler for GET method on the specified pattern with group prefix.
+func (g *RouteGroup) GET(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{GET}, handler)
+}
+
+// POST registers a handler for POST method on the specified pattern with group prefix.
+func (g *RouteGroup) POST(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{POST}, handler)
+}
+
+// PUT registers a handler for PUT method on the specified pattern with group prefix.
+func (g *RouteGroup) PUT(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{PUT}, handler)
+}
+
+// PATCH registers a handler for PATCH method on the specified pattern with group prefix.
+func (g *RouteGroup) PATCH(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{PATCH}, handler)
+}
+
+// DELETE registers a handler for DELETE method on the specified pattern with group prefix.
+func (g *RouteGroup) DELETE(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{DELETE}, handler)
+}
+
+// HEAD registers a handler for HEAD method on the specified pattern with group prefix.
+func (g *RouteGroup) HEAD(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{HEAD}, handler)
+}
+
+// OPTIONS registers a handler for OPTIONS method on the specified pattern with group prefix.
+func (g *RouteGroup) OPTIONS(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{OPTIONS}, handler)
+}
+
+// TRACE registers a handler for TRACE method on the specified pattern with group prefix.
+func (g *RouteGroup) TRACE(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{TRACE}, handler)
+}
+
+// HandleFunc registers a function to handle WebSocket connections for the given pattern with group prefix and default method (GET).
+func (g *RouteGroup) HandleFunc(pattern string, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), []HTTPMethod{GET}, handler)
+}
+
+// HandleFuncWithMethods registers a function to handle WebSocket connections for the given pattern with group prefix and specific HTTP methods.
+func (g *RouteGroup) HandleFuncWithMethods(pattern string, methods []HTTPMethod, handler func(*Conn)) {
+	g.server.HandleFuncWithMethods(g.joinPrefix(pattern), methods, handler)
+}
+
+// Group creates a nested route group with the given prefix appended to the current group's prefix.
+func (g *RouteGroup) Group(prefix string) *RouteGroup {
+	return &RouteGroup{
+		server: g.server,
+		prefix: g.joinPrefix(prefix),
+	}
+}
+
+// joinPrefix joins the group prefix with the pattern
+func (g *RouteGroup) joinPrefix(pattern string) string {
+	if g.prefix == "" {
+		return pattern
+	}
+
+	// Ensure there's only one slash between prefix and pattern
+	result := g.prefix
+	if !strings.HasSuffix(g.prefix, "/") && !strings.HasPrefix(pattern, "/") {
+		result += "/"
+	} else if strings.HasSuffix(g.prefix, "/") && strings.HasPrefix(pattern, "/") {
+		// Remove leading slash from pattern to avoid double slash
+		result += pattern[1:]
+		return result
+	}
+
+	return result + pattern
 }
 
 // containsParam checks if a pattern contains parameter placeholders (e.g., :id)

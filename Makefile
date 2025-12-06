@@ -115,3 +115,6 @@ build-param-routes-example:
 
 build-http-methods-example:
 	$(GOBUILD) ./examples/highlevel/http_methods/
+
+build-route-groups-example:
+	$(GOBUILD) ./examples/highlevel/route_groups/
