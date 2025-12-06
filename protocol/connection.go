@@ -66,8 +66,22 @@ func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
 		if err != nil {
 			continue
 		}
+
+		// Validate that frame payload length is within reasonable bounds
+		if frame.PayloadLen < 0 || frame.PayloadLen > MaxFramePayload {
+			continue // Skip invalid frames to prevent resource exhaustion
+		}
+
 		buf := c.bufPool.Get(int(frame.PayloadLen), -1)
-		copy(buf.Bytes(), frame.Payload)
+
+		// Perform bounds checking before copying
+		payloadBytes := buf.Bytes()
+		if len(payloadBytes) < len(frame.Payload) {
+			// Truncate payload to fit buffer size if necessary
+			frame.Payload = frame.Payload[:len(payloadBytes)]
+		}
+		copy(payloadBytes, frame.Payload)
+
 		atomic.AddInt64(&c.framesReceived, 1)
 		atomic.AddInt64(&c.bytesReceived, frame.PayloadLen)
 		result = append(result, buf)
@@ -166,12 +180,21 @@ func (c *WSConnection) recvLoop() {
 				h := c.handler
 				c.mu.RUnlock()
 				if h != nil {
-					buf := c.bufPool.Get(int(frame.PayloadLen), -1)
-					copy(buf.Bytes(), frame.Payload)
-					go func(b api.Buffer) {
-						defer b.Release()
-						h.Handle(b)
-					}(buf)
+					// Validate that frame payload length is within reasonable bounds
+					if frame.PayloadLen <= MaxFramePayload && frame.PayloadLen >= 0 {
+						buf := c.bufPool.Get(int(frame.PayloadLen), -1)
+						// Perform bounds checking before copying
+						payloadBytes := buf.Bytes()
+						if len(payloadBytes) < len(frame.Payload) {
+							// Truncate payload to fit buffer size if necessary
+							frame.Payload = frame.Payload[:len(payloadBytes)]
+						}
+						copy(payloadBytes, frame.Payload)
+						go func(b api.Buffer) {
+							defer b.Release()
+							h.Handle(b)
+						}(buf)
+					}
 				}
 			}
 		}

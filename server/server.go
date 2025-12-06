@@ -8,6 +8,7 @@ package server
 
 import (
 	"errors"
+	"sync"
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
@@ -28,6 +29,8 @@ type Server struct {
 	executor   api.Executor
 	middleware []Middleware
 	shutdownCh chan struct{}
+	connCount  int64          // current number of active connections
+	connMu     sync.RWMutex   // mutex to protect connection count
 }
 
 // NewServer constructs a Server facade with the given Config and options.
@@ -95,4 +98,11 @@ func (s *Server) GetControl() api.Control {
 // maintaining NUMA locality and high throughput.
 func (s *Server) GetBufferPool() api.BufferPool {
 	return s.pool
+}
+
+// GetActiveConnections returns the current number of active connections.
+func (s *Server) GetActiveConnections() int64 {
+	s.connMu.RLock()
+	defer s.connMu.RUnlock()
+	return s.connCount
 }

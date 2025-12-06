@@ -64,7 +64,20 @@ func (s *Server) Run(handler api.Handler) error {
 			if err != nil {
 				return
 			}
-			go handleConn(wsConn, s.poller)
+
+			// Check connection limit before handling the connection
+			if s.cfg.MaxConnections > 0 {
+				s.connMu.Lock()
+				if s.connCount >= int64(s.cfg.MaxConnections) {
+					s.connMu.Unlock()
+					wsConn.Close() // Close new connection immediately
+					continue       // Skip handling this connection
+				}
+				s.connCount++
+				s.connMu.Unlock()
+			}
+
+			go s.handleConnWithTracking(wsConn, s.poller)
 		}
 	}()
 
@@ -83,16 +96,25 @@ func (s *Server) Run(handler api.Handler) error {
 	return nil
 }
 
-// handleConn reads zero-copy buffers from a WSConnection and pushes them into the reactor.
-func handleConn(conn *protocol.WSConnection, poller api.Poller) {
-	defer conn.Close()
+// handleConnWithTracking reads zero-copy buffers from a WSConnection and pushes them into the reactor.
+// Also tracks the connection count for limiting.
+func (s *Server) handleConnWithTracking(conn *protocol.WSConnection, poller api.Poller) {
+	defer func() {
+		conn.Close()
+		// Decrement connection count when connection is closed
+		if s.cfg.MaxConnections > 0 {
+			s.connMu.Lock()
+			s.connCount--
+			s.connMu.Unlock()
+		}
+	}()
 	for {
 		bufs, err := conn.RecvZeroCopy()
 		if err != nil {
 			return
 		}
 		for _, buf := range bufs {
-			// Push each buffer as a bufEvent into the reactor’s inbox.
+			// Push each buffer as a bufEvent into the reactor's inbox.
 			// Use type assertion to access the Push method.
 			poller.(interface{ Push(concurrency.Event) }).Push(bufEvent{buf: buf})
 		}

@@ -12,6 +12,7 @@ type Buffer interface {
 	Release()
 	Copy() []byte
 	NUMANode() int
+	Capacity() int
 }
 
 // BufferPool provides NUMA-aware buffer allocation.

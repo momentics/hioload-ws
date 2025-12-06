@@ -25,6 +25,7 @@ type Config struct {
 	ExecutorWorkers int               // number of executor workers
 	AffinityScope   api.AffinityScope // CPU/NUMA binding scope
 	ShutdownTimeout time.Duration     // graceful shutdown wait time
+	MaxConnections  int               // maximum number of concurrent connections (0 = no limit)
 }
 
 // DefaultConfig returns safe defaults optimized for throughput and latency.
@@ -41,5 +42,6 @@ func DefaultConfig() *Config {
 		ExecutorWorkers: runtime.NumCPU(),
 		AffinityScope:   api.ScopeThread,
 		ShutdownTimeout: 30 * time.Second,
+		MaxConnections:  10000, // Default 10k connections to prevent resource exhaustion
 	}
 }
