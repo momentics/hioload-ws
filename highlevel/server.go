@@ -184,6 +184,26 @@ func (s *Server) Use(middleware ...Middleware) {
 	s.middleware = append(s.middleware, middleware...)
 }
 
+// Middleware returns the server's middleware chain for testing purposes
+func (s *Server) Middleware() []Middleware {
+	s.handlerMux.RLock()
+	defer s.handlerMux.RUnlock()
+	m := make([]Middleware, len(s.middleware))
+	copy(m, s.middleware)
+	return m
+}
+
+// Handlers returns the server's handlers map for testing purposes
+func (s *Server) Handlers() map[string]*RouteHandler {
+	s.handlerMux.RLock()
+	defer s.handlerMux.RUnlock()
+	h := make(map[string]*RouteHandler, len(s.handlers))
+	for k, v := range s.handlers {
+		h[k] = v
+	}
+	return h
+}
+
 // Group creates a new route group with the given prefix.
 func (s *Server) Group(prefix string) *RouteGroup {
 	return &RouteGroup{
@@ -254,6 +274,11 @@ func (g *RouteGroup) Group(prefix string) *RouteGroup {
 // Use adds middleware to the group's server.
 func (g *RouteGroup) Use(middleware ...Middleware) {
 	g.server.Use(middleware...)
+}
+
+// Prefix returns the group's prefix
+func (g *RouteGroup) Prefix() string {
+	return g.prefix
 }
 
 // joinPrefix joins the group prefix with the pattern

@@ -124,3 +124,6 @@ build-middleware-example:
 
 build-built-in-middleware-example:
 	$(GOBUILD) ./examples/highlevel/built_in_middleware/
+
+build-custom-middleware-example:
+	$(GOBUILD) ./examples/highlevel/custom_middleware/
