@@ -6,6 +6,7 @@
 package pool
 
 import (
+	"sync"
 	"sync/atomic"
 
 	"github.com/momentics/hioload-ws/api"
@@ -32,12 +33,19 @@ type nodeBuf struct {
 
 // numaMap: allocation counters by NUMA node.
 type numaMap struct {
+	mu     sync.RWMutex
 	counts map[int]uint64
 }
 
 func newNumamap() *numaMap      { return &numaMap{counts: make(map[int]uint64)} }
-func (m *numaMap) record(n int) { m.counts[n]++ }
+func (m *numaMap) record(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.counts[n]++
+}
 func (m *numaMap) Get() map[int]uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	out := make(map[int]uint64, len(m.counts))
 	for k, v := range m.counts {
 		out[k] = v

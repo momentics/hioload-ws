@@ -129,16 +129,16 @@ fi
 
 print_status "Running server tests..."
 if [ "$VERBOSE" = true ]; then
-    $TEST_CMD ./server/...
+    $TEST_CMD ./lowlevel/server/...
 else
-    $TEST_CMD ./server/... 2>/dev/null || true  # Ignore errors if no tests exist
+    $TEST_CMD ./lowlevel/server/... 2>/dev/null || true  # Ignore errors if no tests exist
 fi
 
 print_status "Running client tests..."
 if [ "$VERBOSE" = true ]; then
-    $TEST_CMD ./client/...
+    $TEST_CMD ./lowlevel/client/...
 else
-    $TEST_CMD ./client/... 2>/dev/null || true  # Ignore errors if no tests exist
+    $TEST_CMD ./lowlevel/client/... 2>/dev/null || true  # Ignore errors if no tests exist
 fi
 
 # Run benchmarks if requested

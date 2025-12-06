@@ -18,13 +18,13 @@ import (
 // Ensure compile-time interface compliance.
 var _ api.Ring[any] = (*RingBuffer[any])(nil)
 
-// RingBuffer is a lock-free ring buffer.
+// RingBuffer is a lock-free ring buffer (single-producer, single-consumer safe).
 type RingBuffer[T any] struct {
 	data []T
 	mask uint64
-	head uint64
+	head atomic.Uint64
 	_    [64]byte // Padding for hot/cold separation
-	tail uint64
+	tail atomic.Uint64
 	_    [64]byte // Padding to separate tail from other data
 }
 
@@ -41,33 +41,33 @@ func NewRingBuffer[T any](size uint64) *RingBuffer[T] {
 
 // Enqueue adds item; returns false if full.
 func (r *RingBuffer[T]) Enqueue(item T) bool {
-	head := atomic.LoadUint64(&r.head)
-	tail := atomic.LoadUint64(&r.tail)
+	head := r.head.Load()
+	tail := r.tail.Load()
 	if tail-head >= uint64(len(r.data)) {
 		return false
 	}
 	r.data[tail&r.mask] = item
-	atomic.StoreUint64(&r.tail, tail+1)
+	r.tail.Store(tail+1)
 	return true
 }
 
 // Dequeue removes and returns item; ok false if empty.
 func (r *RingBuffer[T]) Dequeue() (T, bool) {
-	head := atomic.LoadUint64(&r.head)
-	tail := atomic.LoadUint64(&r.tail)
+	head := r.head.Load()
+	tail := r.tail.Load()
 	if head >= tail {
 		var zero T
 		return zero, false
 	}
 	item := r.data[head&r.mask]
-	atomic.StoreUint64(&r.head, head+1)
+	r.head.Store(head+1)
 	return item, true
 }
 
 // Len returns number of items currently in buffer.
 func (r *RingBuffer[T]) Len() int {
-	head := atomic.LoadUint64(&r.head)
-	tail := atomic.LoadUint64(&r.tail)
+	head := r.head.Load()
+	tail := r.tail.Load()
 	return int(tail - head)
 }
 
