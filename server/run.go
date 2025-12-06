@@ -11,11 +11,10 @@ import (
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/internal/concurrency"
 	"github.com/momentics/hioload-ws/protocol"
 )
 
-// bufEvent wraps an api.Buffer into a concurrency.Event for the reactor.
+// bufEvent wraps an api.Buffer into an api.Event for the reactor.
 type bufEvent struct {
 	buf api.Buffer
 }
@@ -24,6 +23,9 @@ type bufEvent struct {
 func (e bufEvent) Data() any {
 	return e.buf
 }
+
+// Ensure bufEvent implements api.Event
+var _ api.Event = bufEvent{}
 
 // Run starts the server: it applies CPU/NUMA affinity, starts the reactor,
 // begins accepting WebSocket connections, and blocks until Shutdown() is called.
@@ -115,8 +117,7 @@ func (s *Server) handleConnWithTracking(conn *protocol.WSConnection, poller api.
 		}
 		for _, buf := range bufs {
 			// Push each buffer as a bufEvent into the reactor's inbox.
-			// Use type assertion to access the Push method.
-			poller.(interface{ Push(concurrency.Event) }).Push(bufEvent{buf: buf})
+			poller.Push(bufEvent{buf: buf})
 		}
 	}
 }

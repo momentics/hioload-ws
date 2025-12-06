@@ -1,20 +1,43 @@
+# golangci-lint configuration for hioload-ws
+# Author: momentics <momentics@gmail.com>
+# License: Apache-2.0
+
 run:
   timeout: 5m
-  build-tags:
-    - "linux"
-    - "cgo"
+  tests: true
+  skip-dirs:
+    - tests/fake
+  skip-files:
+    - ".*_test\\.go$"
 
 linters:
   enable:
     - gofmt
+    - golint
     - govet
-    - staticcheck
     - errcheck
-    - ineffassign
-    - misspell
+    - staticcheck
     - unused
+    - gosimple
+    - structcheck
+    - varcheck
+    - ineffassign
+    - deadcode
+  disable-all: false
+  fast: true
+
+linters-settings:
+  golint:
+    min-confidence: 0.8
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  govet:
+    check-shadowing: true
+  staticcheck:
+    checks: ["all"]
 
 issues:
-  exclude-rules:
-    - path: internal/concurrency/affinity_linux.go
-      text: "could not determine kind of name for C."
+  exclude-use-default: false
+  max-per-linter: 0
+  max-same-issues: 0

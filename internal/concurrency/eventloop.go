@@ -161,5 +161,13 @@ func (el *EventLoop) Stop() {
 	default:
 		close(el.quitCh)
 	}
-	<-el.doneCh
+
+	// Check if the loop was actually running before waiting
+	if el.running.Load() {
+		<-el.doneCh
+	} else {
+		// If not running, just make sure quitCh is closed
+		// doneCh is only closed in Run(), so if Run() was never called,
+		// we shouldn't wait for doneCh to be closed
+	}
 }

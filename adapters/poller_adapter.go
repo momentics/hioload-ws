@@ -85,7 +85,18 @@ func (p *PollerAdapter) Stop() {
 }
 
 // Push adds an event to the event loop's inbox for processing.
-// This method is not part of the api.Poller interface but is used via type assertion.
-func (p *PollerAdapter) Push(ev concurrency.Event) bool {
-	return p.eventLoop.Push(ev)
+func (p *PollerAdapter) Push(ev api.Event) bool {
+	// We need to convert api.Event to concurrency.Event
+	// For this, we'll create a wrapper that implements concurrency.Event
+	concurrencyEv := apiEventWrapper{ev: ev}
+	return p.eventLoop.Push(concurrencyEv)
+}
+
+// apiEventWrapper adapts api.Event to concurrency.Event
+type apiEventWrapper struct {
+	ev api.Event
+}
+
+func (w apiEventWrapper) Data() any {
+	return w.ev.Data()
 }
