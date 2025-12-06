@@ -16,12 +16,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/momentics/hioload-ws/api"
 )
 
-type Event interface {
-	// Data carries event payload.
-	Data() any
-}
+type Event = api.Event
 
 type EventHandler interface {
 	// HandleEvent processes a single Event.
@@ -141,6 +140,17 @@ func (el *EventLoop) Run() {
 // Pending returns approximate count of buffered events waiting in inbox.
 func (el *EventLoop) Pending() int {
 	return len(el.inbox)
+}
+
+// Push adds an event to the event loop's inbox for processing.
+// Non-blocking, returns false if inbox is full.
+func (el *EventLoop) Push(ev Event) bool {
+	select {
+	case el.inbox <- ev:
+		return true
+	default:
+		return false // inbox is full
+	}
 }
 
 // Stop signals the Run loop to exit and waits for completion.

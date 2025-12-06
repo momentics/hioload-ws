@@ -83,3 +83,9 @@ func (p *PollerAdapter) Unregister(h api.Handler) error {
 func (p *PollerAdapter) Stop() {
 	p.eventLoop.Stop()
 }
+
+// Push adds an event to the event loop's inbox for processing.
+// This method is not part of the api.Poller interface but is used via type assertion.
+func (p *PollerAdapter) Push(ev concurrency.Event) bool {
+	return p.eventLoop.Push(ev)
+}

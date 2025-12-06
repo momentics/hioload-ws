@@ -6,6 +6,12 @@
 
 package api
 
+// Event represents an event that can be processed by the poller.
+type Event interface {
+	// Data carries event payload.
+	Data() any
+}
+
 // Poller represents a batched event-reactor.
 type Poller interface {
 	// Poll handles up to maxEvents; returns number processed and error.
@@ -16,4 +22,6 @@ type Poller interface {
 	Unregister(h Handler) error
 	// Stop gracefully stops the poller, releasing resources.
 	Stop()
+	// Push adds an event to the poller for processing.
+	Push(ev Event) bool
 }
