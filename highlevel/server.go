@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/momentics/hioload-ws/adapters"
@@ -44,6 +45,12 @@ type RouteGroup struct {
 	server *Server
 	prefix string
 }
+
+// Global metrics counters
+var (
+	globalActiveConns int64
+	globalTotalMsgs   int64
+)
 
 // Server wraps the low-level server with a high-level API.
 type Server struct {
@@ -275,6 +282,60 @@ func (s *Server) applyMiddleware(handler func(*Conn)) func(*Conn) {
 		handler = s.middleware[i](handler)
 	}
 	return handler
+}
+
+// Built-in middleware functions
+
+// LoggingMiddleware logs connection information
+func LoggingMiddleware(next func(*Conn)) func(*Conn) {
+	return func(conn *Conn) {
+		// Log connection start
+		fmt.Printf("[LOG] WebSocket connection started from %s\n", conn.RemoteAddr())
+
+		// Execute the next handler
+		next(conn)
+
+		// Log connection end
+		fmt.Printf("[LOG] WebSocket connection from %s ended\n", conn.RemoteAddr())
+	}
+}
+
+// RecoveryMiddleware recovers from panics in handlers
+func RecoveryMiddleware(next func(*Conn)) func(*Conn) {
+	return func(conn *Conn) {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("[RECOVERY] Panic recovered in handler: %v\n", r)
+				// Optionally close the connection if there was a panic
+				_ = conn.Close()
+			}
+		}()
+		next(conn)
+	}
+}
+
+// MetricsMiddleware collects basic metrics
+func MetricsMiddleware(next func(*Conn)) func(*Conn) {
+	return func(conn *Conn) {
+		// Increment active connections
+		active := atomic.AddInt64(&globalActiveConns, 1)
+		fmt.Printf("[METRICS] Active connections: %d\n", active)
+
+		// Execute the next handler
+		next(conn)
+
+		// Decrement active connections
+		active = atomic.AddInt64(&globalActiveConns, -1)
+		fmt.Printf("[METRICS] Active connections: %d\n", active)
+	}
+}
+
+// GetMetrics returns current server metrics
+func GetMetrics() map[string]int64 {
+	return map[string]int64{
+		"active_connections": globalActiveConns,
+		"total_messages":     globalTotalMsgs,
+	}
 }
 
 // containsParam checks if a pattern contains parameter placeholders (e.g., :id)

@@ -121,3 +121,6 @@ build-route-groups-example:
 
 build-middleware-example:
 	$(GOBUILD) ./examples/highlevel/middleware/
+
+build-built-in-middleware-example:
+	$(GOBUILD) ./examples/highlevel/built_in_middleware/

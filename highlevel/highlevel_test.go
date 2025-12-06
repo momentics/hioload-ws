@@ -157,3 +157,34 @@ func TestGroupMiddleware(t *testing.T) {
 
 	t.Log("Group middleware registered successfully")
 }
+
+func TestBuiltInMiddleware(t *testing.T) {
+	// Test that built-in middleware functions exist and can be used
+	handler := func(conn *Conn) {}
+
+	// Test LoggingMiddleware
+	loggingHandler := LoggingMiddleware(handler)
+	if loggingHandler == nil {
+		t.Error("LoggingMiddleware returned nil")
+	}
+
+	// Test RecoveryMiddleware
+	recoveryHandler := RecoveryMiddleware(handler)
+	if recoveryHandler == nil {
+		t.Error("RecoveryMiddleware returned nil")
+	}
+
+	// Test MetricsMiddleware
+	metricsHandler := MetricsMiddleware(handler)
+	if metricsHandler == nil {
+		t.Error("MetricsMiddleware returned nil")
+	}
+
+	// Test GetMetrics function
+	metrics := GetMetrics()
+	if metrics == nil {
+		t.Error("GetMetrics returned nil")
+	}
+
+	t.Log("Built-in middleware functions are available")
+}
