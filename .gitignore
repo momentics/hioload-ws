@@ -25,16 +25,6 @@
 *.prof
 *.trace
 
-# Common binary names from examples/binaries
-broadcast
-echo
-hioload-echo
-hioload-broadcast
-hioload-test
-hioload-client
-hioload-server
-hioload-example
-
 # Build artifacts directory
 bin/
 dist/
