@@ -19,6 +19,7 @@ import (
 type WSConnection struct {
 	transport api.Transport  // Underlying I/O abstraction
 	bufPool   api.BufferPool // NUMA-aware buffer pool
+	path      string         // Request path for routing
 
 	inbox  chan *WSFrame
 	outbox chan *WSFrame
@@ -35,7 +36,7 @@ type WSConnection struct {
 	framesSent     int64
 }
 
-// NewWSConnection constructs a WSConnection with specified channel capacity.
+// NewWSConnection constructs a WSConnection with specified channel capacity and path.
 func NewWSConnection(tr api.Transport, pool api.BufferPool, channelSize int) *WSConnection {
 	return &WSConnection{
 		transport: tr,
@@ -46,10 +47,32 @@ func NewWSConnection(tr api.Transport, pool api.BufferPool, channelSize int) *WS
 	}
 }
 
+// NewWSConnectionWithPath constructs a WSConnection with specified channel capacity and request path.
+func NewWSConnectionWithPath(tr api.Transport, pool api.BufferPool, channelSize int, path string) *WSConnection {
+	return &WSConnection{
+		transport: tr,
+		bufPool:   pool,
+		path:      path,
+		inbox:     make(chan *WSFrame, channelSize),
+		outbox:    make(chan *WSFrame, channelSize),
+		done:      make(chan struct{}),
+	}
+}
+
 // Transport provides access to the underlying api.Transport.
 // This enables external wrappers to set I/O deadlines or query transport features.
 func (c *WSConnection) Transport() api.Transport {
 	return c.transport
+}
+
+// Path returns the original request path for routing purposes.
+func (c *WSConnection) Path() string {
+	return c.path
+}
+
+// BufferPool returns the buffer pool associated with this connection.
+func (c *WSConnection) BufferPool() api.BufferPool {
+	return c.bufPool
 }
 
 // RecvZeroCopy performs zero-copy receive: it invokes transport.Recv(),
@@ -209,7 +232,8 @@ func (c *WSConnection) sendLoop() {
 		case <-c.done:
 			return
 		case frame := <-c.outbox:
-			data, err := EncodeFrameToBytes(frame)
+			// Use masked encoding if this is a client connection (indicated by Masked field)
+			data, err := EncodeFrameToBytesWithMask(frame, frame.Masked)
 			if err != nil {
 				c.Close()
 				return

@@ -11,7 +11,7 @@ import (
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/core/protocol"
+	"github.com/momentics/hioload-ws/protocol"
 	"github.com/momentics/hioload-ws/lowlevel/server"
 )
 
@@ -129,18 +129,27 @@ func (s *Server) ListenAndServe() error {
 			
 			// For now, we'll implement a basic handler that can receive the connection info
 			// This requires access to the WSConnection through ContextFromData
-			connInterface := api.FromContext(api.ContextFromData(data))
-			if wsConn, ok := connInterface.(*protocol.WSConnection); ok {
+			// For events that contain the connection directly (bufEventWithConn), we can extract the path
+			var wsConn *protocol.WSConnection
+
+			// Check if the data contains a connection (in case of custom event with connection)
+			if connData, ok := data.(interface{ WSConnection() *protocol.WSConnection }); ok {
+				wsConn = connData.WSConnection()
+			} else {
+				connInterface := api.FromContext(api.ContextFromData(data))
+				if wsConnInterface, ok := connInterface.(*protocol.WSConnection); ok {
+					wsConn = wsConnInterface
+				}
+			}
+
+			if wsConn != nil {
 				// Create a high-level connection wrapper
 				pool := s.underlying.GetBufferPool()
 				hlConn := newConn(wsConn, pool)
-				
-				// Find the appropriate handler based on the connection's path or other identifying info
-				// Since we don't have the path readily available here, we'll need to find it differently
-				// The current hioload-ws architecture makes this a bit complex
-				// We'll call the handler with the connection
-				handler := s.findHandler("/") // Default to root for now - needs improvement
-				
+
+				// Find the appropriate handler based on the connection's path
+				handler := s.findHandler(wsConn.Path())
+
 				if handler != nil {
 					handler(hlConn)
 				} else {

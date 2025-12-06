@@ -9,7 +9,7 @@ import (
 
 	"github.com/momentics/hioload-ws/api"
 	"github.com/momentics/hioload-ws/lowlevel/client"
-	"github.com/momentics/hioload-ws/core/protocol"
+	"github.com/momentics/hioload-ws/protocol"
 )
 
 // Conn represents a WebSocket connection with automatic resource management.
@@ -63,10 +63,8 @@ func newClientConn(underlying *protocol.WSConnection, pool api.BufferPool, clien
 // This can be used for direct access to low-level functionality
 func (c *Conn) GetUnderlyingWSConnection() *protocol.WSConnection {
 	if c.client != nil {
-		// If we have a client, get the connection from there
-		// Note: This requires the client to have a public method to access the connection
-		// In a real implementation, we'd need to modify the client package
-		return nil // For now, we can't access the unexported connection
+		// If we have a client, get the connection from the client
+		return c.client.GetWSConnection()
 	}
 	return c.underlying
 }
@@ -107,21 +105,45 @@ func (c *Conn) readMessage() (messageType int, p []byte, err error) {
 		return 0, nil, errors.New("connection closed")
 	}
 	c.mutex.RUnlock()
-	
-	// Use zero-copy receive method
-	buffers, err := c.underlying.RecvZeroCopy()
-	if err != nil {
-		return 0, nil, err
+
+	// Use zero-copy receive method with timeout
+	var buffers []api.Buffer
+
+	if c.readTimeout > 0 {
+		// Implement timeout logic
+		done := make(chan struct{})
+		var recvErr error
+		var recvBuffers []api.Buffer
+
+		go func() {
+			defer close(done)
+			recvBuffers, recvErr = c.underlying.RecvZeroCopy()
+		}()
+
+		select {
+		case <-time.After(c.readTimeout):
+			return 0, nil, errors.New("read timeout")
+		case <-done:
+			if recvErr != nil {
+				return 0, nil, recvErr
+			}
+			buffers = recvBuffers
+		}
+	} else {
+		buffers, err = c.underlying.RecvZeroCopy()
+		if err != nil {
+			return 0, nil, err
+		}
 	}
-	
+
 	if len(buffers) == 0 {
 		return 0, nil, errors.New("no message received")
 	}
-	
+
 	// Get the first buffer
 	buf := buffers[0]
 	data := buf.Bytes()
-	
+
 	// Check size limit
 	if c.readLimit > 0 && int64(len(data)) > c.readLimit {
 		if c.autoRelease {
@@ -129,18 +151,18 @@ func (c *Conn) readMessage() (messageType int, p []byte, err error) {
 		}
 		return 0, nil, errors.New("message exceeds read limit")
 	}
-	
+
 	// Create a copy of the data to return
 	// For true zero-copy semantics, we could return a reference to the buffer
 	// and manage its lifecycle, but this is simpler for the high-level API
 	result := make([]byte, len(data))
 	copy(result, data)
-	
+
 	// Release the buffer (important for zero-copy semantics)
 	if c.autoRelease {
 		buf.Release()
 	}
-	
+
 	// Return binary message type for now - in real implementation we'd extract from frame
 	return int(BinaryMessage), result, nil
 }
@@ -192,6 +214,11 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 		Payload:    dest[:len(data)], // Use the buffer slice directly for zero-copy
 	}
 
+	// For client connections, make sure frames are masked per RFC 6455
+	if c.client != nil {
+		frame.Masked = true
+	}
+
 	// Send the frame using the appropriate connection method
 	var sendErr error
 	if c.client != nil {
@@ -239,15 +266,35 @@ func (c *Conn) SetReadLimit(limit int64) {
 
 // SetReadDeadline sets the read deadline.
 func (c *Conn) SetReadDeadline(t time.Time) error {
-	// This functionality would be implemented based on underlying transport
-	// For now, we'll return nil as a placeholder
+	c.mutex.Lock()
+	c.readTimeout = time.Until(t)
+	c.mutex.Unlock()
+
+	// Apply deadline to the underlying transport if it supports it
+	conn := c.GetUnderlyingWSConnection()
+	if conn != nil {
+		transport := conn.Transport()
+		if deadlineSetter, ok := transport.(interface{ SetReadDeadline(time.Time) error }); ok {
+			return deadlineSetter.SetReadDeadline(t)
+		}
+	}
 	return nil
 }
 
 // SetWriteDeadline sets the write deadline.
 func (c *Conn) SetWriteDeadline(t time.Time) error {
-	// This functionality would be implemented based on underlying transport
-	// For now, we'll return nil as a placeholder
+	c.mutex.Lock()
+	c.writeTimeout = time.Until(t)
+	c.mutex.Unlock()
+
+	// Apply deadline to the underlying transport if it supports it
+	conn := c.GetUnderlyingWSConnection()
+	if conn != nil {
+		transport := conn.Transport()
+		if deadlineSetter, ok := transport.(interface{ SetWriteDeadline(time.Time) error }); ok {
+			return deadlineSetter.SetWriteDeadline(t)
+		}
+	}
 	return nil
 }
 
@@ -264,12 +311,6 @@ func (c *Conn) writeMessage(messageType int, data []byte) error {
 		return errors.New("connection closed")
 	}
 	c.mutex.RUnlock()
-
-	// Set write timeout if configured
-	if c.writeTimeout > 0 {
-		// In the real implementation, we'd implement timeout handling
-		// This is a simplified version
-	}
 
 	// Get a buffer from the pool for zero-copy sending
 	buf := c.pool.Get(len(data), -1)  // Use appropriate NUMA node
@@ -303,14 +344,47 @@ func (c *Conn) writeMessage(messageType int, data []byte) error {
 		Payload:    dest[:len(data)], // Use the buffer slice directly for zero-copy
 	}
 
-	// Send the frame using the appropriate connection method
+	// For client connections, make sure frames are masked per RFC 6455
+	if c.client != nil {
+		frame.Masked = true
+	}
+
+	// Send the frame using the appropriate connection method with timeout
 	var sendErr error
 	if c.client != nil {
-		// Use client's WriteMessage method
-		sendErr = c.client.WriteMessage(messageType, data)  // Use our enhanced client method
+		// Use client's WriteMessage method with timeout handling
+		if c.writeTimeout > 0 {
+			done := make(chan error, 1)
+			go func() {
+				done <- c.client.WriteMessage(messageType, data)
+			}()
+
+			select {
+			case sendErr = <-done:
+				// Message sent, continue
+			case <-time.After(c.writeTimeout):
+				sendErr = errors.New("write timeout")
+			}
+		} else {
+			sendErr = c.client.WriteMessage(messageType, data)
+		}
 	} else {
-		// Use server connection's SendFrame method
-		sendErr = c.underlying.SendFrame(frame)
+		// Use server connection's SendFrame method with timeout handling
+		if c.writeTimeout > 0 {
+			done := make(chan error, 1)
+			go func() {
+				done <- c.underlying.SendFrame(frame)
+			}()
+
+			select {
+			case sendErr = <-done:
+				// Message sent, continue
+			case <-time.After(c.writeTimeout):
+				sendErr = errors.New("write timeout")
+			}
+		} else {
+			sendErr = c.underlying.SendFrame(frame)
+		}
 	}
 
 	// Release the buffer after we're done referencing it

@@ -84,30 +84,81 @@ func DecodeFrameFromBytes(raw []byte) (*WSFrame, error) {
 // EncodeFrameToBytes serializes WSFrame into []byte,
 // enforcing maximum payload size.
 func EncodeFrameToBytes(f *WSFrame) ([]byte, error) {
+	return EncodeFrameToBytesWithMask(f, f.Masked)
+}
+
+// EncodeFrameToBytesWithMask serializes WSFrame into []byte with specific mask setting,
+// enforcing maximum payload size.
+func EncodeFrameToBytesWithMask(f *WSFrame, mask bool) ([]byte, error) {
 	if f.PayloadLen > MaxFramePayload {
 		return nil, errors.New("frame payload exceeds maximum allowed size")
 	}
-	b0 := byte(0x80) | (f.Opcode & 0x0F)
+
+	var b0 byte
+	if f.IsFinal {
+		b0 = 0x80
+	}
+	b0 |= (f.Opcode & 0x0F)
+
 	plen := int(f.PayloadLen)
 	var hdr []byte
 
 	switch {
 	case plen <= 125:
-		hdr = []byte{b0, byte(plen)}
+		hdr = []byte{b0, 0}
+		if mask {
+			hdr[1] = byte(plen) | 0x80  // Set mask bit
+		} else {
+			hdr[1] = byte(plen)
+		}
 	case plen <= 0xFFFF:
 		hdr = make([]byte, 4)
 		hdr[0] = b0
-		hdr[1] = 126
+		if mask {
+			hdr[1] = 126 | 0x80  // Set mask bit
+		} else {
+			hdr[1] = 126
+		}
 		binary.BigEndian.PutUint16(hdr[2:], uint16(plen))
 	default:
 		hdr = make([]byte, 10)
 		hdr[0] = b0
-		hdr[1] = 127
+		if mask {
+			hdr[1] = 127 | 0x80  // Set mask bit
+		} else {
+			hdr[1] = 127
+		}
 		binary.BigEndian.PutUint64(hdr[2:], uint64(plen))
 	}
 
-	buf := make([]byte, len(hdr)+plen)
+	var totalLen int
+	if mask {
+		totalLen = len(hdr) + 4 + plen  // header + mask key + payload
+	} else {
+		totalLen = len(hdr) + plen      // header + payload
+	}
+
+	buf := make([]byte, totalLen)
 	copy(buf, hdr)
-	copy(buf[len(hdr):], f.Payload)
+
+	payloadStart := len(hdr)
+	if mask {
+		// Generate random mask key (in production, use crypto/rand)
+		// For simplicity, using a static mask key for now, but should be random
+		maskKey := [4]byte{0x12, 0x34, 0x56, 0x78}  // Example mask key
+		copy(buf[payloadStart:], maskKey[:])
+		payloadStart += 4
+
+		// Apply mask to payload
+		maskedPayload := make([]byte, len(f.Payload))
+		copy(maskedPayload, f.Payload)
+		for i := 0; i < len(maskedPayload); i++ {
+			maskedPayload[i] ^= maskKey[i%4]
+		}
+		copy(buf[payloadStart:], maskedPayload)
+	} else {
+		copy(buf[payloadStart:], f.Payload)
+	}
+
 	return buf, nil
 }

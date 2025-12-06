@@ -73,7 +73,9 @@ func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 		}
 		return nil, err
 	}
-	hdrs, err := protocol.DoHandshakeCore(tcpConn)
+
+	// Extract request path during handshake
+	hdrs, path, err := protocol.DoHandshakeCoreWithPath(tcpConn)
 	if err != nil {
 		tcpConn.Close()
 		return nil, fmt.Errorf("handshake request failed: %w", err)
@@ -87,7 +89,7 @@ func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 		bufferPool: wsl.bufferPool,
 		numaNode:   wsl.numaNode,
 	}
-	wsConn := protocol.NewWSConnection(tr, wsl.bufferPool, wsl.channelSize)
+	wsConn := protocol.NewWSConnectionWithPath(tr, wsl.bufferPool, wsl.channelSize, path)
 	return wsConn, nil
 }
 

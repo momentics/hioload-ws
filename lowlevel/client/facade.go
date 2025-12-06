@@ -181,17 +181,18 @@ func (c *Client) ReadMessage() (messageType int, p []byte, err error) {
 
 // WriteMessage writes a message to the connection.
 func (c *Client) WriteMessage(messageType int, data []byte) error {
-	// Get a buffer from the pool for zero-copy sending
-	buf := c.conn.Transport().(interface{ GetBuffer() api.Buffer }).GetBuffer()
+	// Get a buffer from the connection's buffer pool for zero-copy sending
+	buf := c.conn.BufferPool().Get(len(data), -1)  // Use the connection's buffer pool
 
 	// Copy data to the buffer
 	dest := buf.Bytes()
 	copy(dest, data)
 
-	// Create a frame
+	// Create a frame - for client, frames must be masked per RFC 6455
 	frame := &protocol.WSFrame{
 		IsFinal:    true,
 		Opcode:     byte(messageType),
+		Masked:     true,  // Client frames must be masked per RFC 6455
 		PayloadLen: int64(len(data)),
 		Payload:    dest[:len(data)],
 	}
@@ -234,6 +235,11 @@ func (c *Client) Close() error {
 	c.wg.Wait()
 	c.conn.Close()
 	return nil
+}
+
+// GetWSConnection returns the underlying WebSocket connection.
+func (c *Client) GetWSConnection() *protocol.WSConnection {
+	return c.conn
 }
 
 // sendLoop flushes batches on context cancellation or flush triggers.

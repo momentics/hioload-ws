@@ -40,12 +40,17 @@ var (
 // DoHandshakeCore reads and validates the HTTP/1.1 Upgrade request from r.
 // Returns the headers to include in the HTTP 101 Switching Protocols response.
 func DoHandshakeCore(r io.Reader) (http.Header, error) {
+	hdrs, _, err := DoHandshakeCoreWithPath(r)
+	return hdrs, err
+}
 
-	
+// DoHandshakeCoreWithPath reads and validates the HTTP/1.1 Upgrade request from r.
+// Returns the headers to include in the HTTP 101 Switching Protocols response and the request path.
+func DoHandshakeCoreWithPath(r io.Reader) (http.Header, string, error) {
 	br := bufio.NewReader(r)
 	req, err := http.ReadRequest(br)
 	if err != nil {
-		return nil, fmt.Errorf("handshake read request: %w", err)
+		return nil, "", fmt.Errorf("handshake read request: %w", err)
 	}
 
 	// Enforce a maximum total header size to prevent abuse.
@@ -55,7 +60,7 @@ func DoHandshakeCore(r io.Reader) (http.Header, error) {
 		for _, v := range vs {
 			total += len(v)
 			if total > MaxHandshakeHeadersSize {
-				return nil, fmt.Errorf("handshake headers too large")
+				return nil, "", fmt.Errorf("handshake headers too large")
 			}
 		}
 	}
@@ -63,18 +68,18 @@ func DoHandshakeCore(r io.Reader) (http.Header, error) {
 	// Validate required upgrade tokens.
 	if !headerContainsToken(req.Header, HeaderConnection, "Upgrade") ||
 		!headerContainsToken(req.Header, HeaderUpgrade, "websocket") {
-		return nil, ErrInvalidUpgradeHeaders
+		return nil, "", ErrInvalidUpgradeHeaders
 	}
 
 	// Verify WebSocket version.
 	if req.Header.Get(HeaderSecWebSocketVer) != RequiredWebSocketVersion {
-		return nil, ErrBadWebSocketVersion
+		return nil, "", ErrBadWebSocketVersion
 	}
 
 	// Extract client key.
 	key := req.Header.Get(HeaderSecWebSocketKey)
 	if key == "" {
-		return nil, ErrMissingWebSocketKey
+		return nil, "", ErrMissingWebSocketKey
 	}
 
 	// Compute the Sec-WebSocket-Accept.
@@ -87,7 +92,7 @@ func DoHandshakeCore(r io.Reader) (http.Header, error) {
 	hdr.Set("Upgrade", "websocket")
 	hdr.Set("Connection", "Upgrade")
 	hdr.Set("Sec-WebSocket-Accept", accept)
-	return hdr, nil
+	return hdr, req.URL.Path, nil
 }
 
 // WriteHandshakeResponse writes the HTTP/1.1 101 Switching Protocols response

@@ -27,6 +27,26 @@ func (e bufEvent) Data() any {
 // Ensure bufEvent implements api.Event
 var _ api.Event = bufEvent{}
 
+// bufEventWithConn wraps an api.Buffer and a WSConnection for the reactor.
+// This allows us to pass connection context (like path) to the handler.
+type bufEventWithConn struct {
+	buf  api.Buffer
+	conn *protocol.WSConnection
+}
+
+// Data returns the underlying buffer payload for event dispatch.
+func (e bufEventWithConn) Data() any {
+	return e.buf
+}
+
+// WSConnection returns the WebSocket connection associated with this event.
+func (e bufEventWithConn) WSConnection() *protocol.WSConnection {
+	return e.conn
+}
+
+// Ensure bufEventWithConn implements api.Event
+var _ api.Event = bufEventWithConn{}
+
 // Run starts the server: it applies CPU/NUMA affinity, starts the reactor,
 // begins accepting WebSocket connections, and blocks until Shutdown() is called.
 // It then orchestrates graceful teardown.
@@ -117,7 +137,9 @@ func (s *Server) handleConnWithTracking(conn *protocol.WSConnection, poller api.
 		}
 		for _, buf := range bufs {
 			// Push each buffer as a bufEvent into the reactor's inbox.
-			poller.Push(bufEvent{buf: buf})
+			// Create an event that contains both the buffer and the connection context
+			event := bufEventWithConn{buf: buf, conn: conn}
+			poller.Push(event)
 		}
 	}
 }

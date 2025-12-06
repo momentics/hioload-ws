@@ -261,3 +261,8 @@ func (c *WSConnection) GetStats() map[string]int64 {
 		"frames_sent":     atomic.LoadInt64(&c.framesSent),
 	}
 }
+
+// BufferPool returns the buffer pool associated with this connection.
+func (c *WSConnection) BufferPool() api.BufferPool {
+	return c.bufPool
+}

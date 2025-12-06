@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/momentics/hioload-ws/lowlevel/client"
-	"github.com/momentics/hioload-ws/core/buffer"
-	"github.com/momentics/hioload-ws/core/concurrency"
+	"github.com/momentics/hioload-ws/pool"
+	"github.com/momentics/hioload-ws/internal/concurrency"
 )
 
 // Dial connects to a WebSocket server.
