@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,10 +16,30 @@ import (
 	"github.com/momentics/hioload-ws/lowlevel/server"
 )
 
+// HTTPMethod represents an HTTP method
+type HTTPMethod string
+
+const (
+	GET    HTTPMethod = "GET"
+	POST   HTTPMethod = "POST"
+	PUT    HTTPMethod = "PUT"
+	PATCH  HTTPMethod = "PATCH"
+	DELETE HTTPMethod = "DELETE"
+	HEAD   HTTPMethod = "HEAD"
+	OPTIONS HTTPMethod = "OPTIONS"
+	TRACE  HTTPMethod = "TRACE"
+)
+
+// RouteHandler holds both the WebSocket handler and the allowed HTTP methods
+type RouteHandler struct {
+	Handler func(*Conn)
+	Methods []HTTPMethod
+}
+
 // Server wraps the low-level server with a high-level API.
 type Server struct {
 	addr       string
-	handlers   map[string]func(*Conn)
+	handlers   map[string]*RouteHandler  // Exact path handlers with HTTP methods
 	handlerMux sync.RWMutex
 	opts       []server.ServerOption
 	// Reference to the underlying server
@@ -32,36 +53,63 @@ type Server struct {
 	connections   map[*Conn]bool
 	connectionsMu sync.RWMutex
 	// Path patterns for route matching
-	patterns map[*regexp.Regexp]func(*Conn)
+	patterns map[*regexp.Regexp]*RouteHandler
+	// Route patterns with parameter names (for named parameter extraction)
+	routePatterns map[string][]string  // maps pattern to parameter names
+	// Store allowed methods for each pattern (for error responses)
+	patternMethods map[*regexp.Regexp][]HTTPMethod
 }
 
 // NewServer creates a new high-level WebSocket server.
 func NewServer(addr string) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Server{
-		addr:        addr,
-		handlers:    make(map[string]func(*Conn)),
-		opts:        make([]server.ServerOption, 0),
-		cfg:         server.DefaultConfig(),
-		ctx:         ctx,
-		cancel:      cancel,
-		connections: make(map[*Conn]bool),
-		patterns:    make(map[*regexp.Regexp]func(*Conn)),
+		addr:           addr,
+		handlers:       make(map[string]*RouteHandler),
+		opts:           make([]server.ServerOption, 0),
+		cfg:            server.DefaultConfig(),
+		ctx:            ctx,
+		cancel:         cancel,
+		connections:    make(map[*Conn]bool),
+		patterns:       make(map[*regexp.Regexp]*RouteHandler),
+		routePatterns:  make(map[string][]string),
+		patternMethods: make(map[*regexp.Regexp][]HTTPMethod),
 	}
 }
 
-// HandleFunc registers a function to handle WebSocket connections for the given pattern.
+// HandleFunc registers a function to handle WebSocket connections for the given pattern with default methods (GET).
 func (s *Server) HandleFunc(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{GET}, handler)
+}
+
+// HandleFuncWithMethods registers a function to handle WebSocket connections for the given pattern with specific HTTP methods.
+func (s *Server) HandleFuncWithMethods(pattern string, methods []HTTPMethod, handler func(*Conn)) {
 	s.handlerMux.Lock()
 	defer s.handlerMux.Unlock()
-	
-	// If the pattern is a simple path without regex, store it directly
-	if !containsRegex(pattern) {
-		s.handlers[pattern] = handler
+
+	routeHandler := &RouteHandler{
+		Handler: handler,
+		Methods: methods,
+	}
+
+	// Check if the pattern contains parameters (e.g., /users/:id/messages/:messageId)
+	if containsParam(pattern) {
+		// Convert parameterized route to regex
+		regexPattern, paramNames := convertToRegex(pattern)
+		regex := regexp.MustCompile("^" + regexPattern + "$")
+
+		// Store the handler and parameter names
+		s.patterns[regex] = routeHandler
+		s.routePatterns[regexPattern] = paramNames
+		s.patternMethods[regex] = methods
+	} else if !containsRegex(pattern) {
+		// If the pattern is a simple path without regex, store it directly
+		s.handlers[pattern] = routeHandler
 	} else {
 		// Compile the pattern as a regex
 		regex := regexp.MustCompile(pattern)
-		s.patterns[regex] = handler
+		s.patterns[regex] = routeHandler
+		s.patternMethods[regex] = methods
 	}
 }
 
@@ -70,25 +118,144 @@ func containsRegex(pattern string) bool {
 	return regexp.MustCompile(`[\*\+\?\[\]\^\$\.\|\\()]`).MatchString(pattern)
 }
 
-// findHandler finds the appropriate handler for a request path
-func (s *Server) findHandler(path string) func(*Conn) {
-	s.handlerMux.RLock()
-	defer s.handlerMux.RUnlock()
-	
-	// Find exact match first
-	if handler, exists := s.handlers[path]; exists {
-		return handler
-	}
-	
-	// Try to match with regex patterns
-	for pattern, handler := range s.patterns {
-		if pattern.MatchString(path) {
-			return handler
+// GET registers a handler for GET method on the specified pattern.
+func (s *Server) GET(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{GET}, handler)
+}
+
+// POST registers a handler for POST method on the specified pattern.
+func (s *Server) POST(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{POST}, handler)
+}
+
+// PUT registers a handler for PUT method on the specified pattern.
+func (s *Server) PUT(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{PUT}, handler)
+}
+
+// PATCH registers a handler for PATCH method on the specified pattern.
+func (s *Server) PATCH(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{PATCH}, handler)
+}
+
+// DELETE registers a handler for DELETE method on the specified pattern.
+func (s *Server) DELETE(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{DELETE}, handler)
+}
+
+// HEAD registers a handler for HEAD method on the specified pattern.
+func (s *Server) HEAD(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{HEAD}, handler)
+}
+
+// OPTIONS registers a handler for OPTIONS method on the specified pattern.
+func (s *Server) OPTIONS(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{OPTIONS}, handler)
+}
+
+// TRACE registers a handler for TRACE method on the specified pattern.
+func (s *Server) TRACE(pattern string, handler func(*Conn)) {
+	s.HandleFuncWithMethods(pattern, []HTTPMethod{TRACE}, handler)
+}
+
+// containsParam checks if a pattern contains parameter placeholders (e.g., :id)
+func containsParam(pattern string) bool {
+	return strings.Contains(pattern, ":")
+}
+
+// convertToRegex converts a parameterized route to a regex pattern and extracts parameter names
+func convertToRegex(pattern string) (regex string, paramNames []string) {
+	// Split the pattern by "/"
+	parts := strings.Split(pattern, "/")
+	regexParts := make([]string, 0, len(parts))
+	var params []string
+
+	for _, part := range parts {
+		if strings.HasPrefix(part, ":") {
+			// This is a parameter part like ":id"
+			paramName := strings.TrimPrefix(part, ":")
+			regexParts = append(regexParts, `([^/]+)`) // Match any characters except "/"
+			params = append(params, paramName)
+		} else if part == "" && len(parts) > 1 {
+			// Handle the case where pattern starts with "/" (first part is empty)
+			continue
+		} else {
+			// This is a static part, escape special regex chars
+			escaped := regexp.QuoteMeta(part)
+			regexParts = append(regexParts, escaped)
 		}
 	}
-	
-	// Return nil if no handler found
-	return nil
+
+	// Combine with "/" separators
+	regex = strings.Join(regexParts, "/")
+	paramNames = params
+	return
+}
+
+// findHandler finds the appropriate handler for a request path and extracts parameters
+// For now, we assume the HTTP method is GET since WebSocket upgrade requires GET method
+// In the future, this can be extended to check against allowed methods
+func (s *Server) findHandler(path string, method HTTPMethod) (*RouteHandler, []RouteParam) {
+	s.handlerMux.RLock()
+	defer s.handlerMux.RUnlock()
+
+	// Find exact match first
+	if handler, exists := s.handlers[path]; exists {
+		// Check if the method is allowed
+		if isMethodAllowed(method, handler.Methods) {
+			return handler, nil
+		}
+	}
+
+	// Try to match with regex patterns and extract parameters
+	for pattern, handler := range s.patterns {
+		matches := pattern.FindStringSubmatch(path)
+		if matches != nil && len(matches) > 1 {
+			// Check if the method is allowed
+			if !isMethodAllowed(method, handler.Methods) {
+				continue
+			}
+
+			// Extract parameter names for this pattern
+			// Find the corresponding regex pattern to get parameter names
+			var paramNames []string
+			for regexStr, names := range s.routePatterns {
+				// Check if this regex matches our pattern
+				if regexp.MustCompile("^" + regexp.QuoteMeta(regexStr) + "$").MatchString(pattern.String()) {
+					paramNames = names
+					break
+				}
+			}
+
+			// Create parameter map
+			var params []RouteParam
+			for i, paramName := range paramNames {
+				if i+1 < len(matches) {
+					params = append(params, RouteParam{Key: paramName, Value: matches[i+1]})
+				}
+			}
+
+			return handler, params
+		}
+	}
+
+	// Return nil if no handler found or method not allowed
+	return nil, nil
+}
+
+// isMethodAllowed checks if the given HTTP method is in the allowed methods list
+func isMethodAllowed(method HTTPMethod, allowedMethods []HTTPMethod) bool {
+	if len(allowedMethods) == 0 {
+		// If no methods are specified, default to allowing GET for WebSocket
+		return method == GET
+	}
+
+	for _, allowed := range allowedMethods {
+		if allowed == method {
+			return true
+		}
+	}
+	return false
 }
 
 // addConnection adds a connection to the tracking list
@@ -143,17 +310,21 @@ func (s *Server) ListenAndServe() error {
 			}
 
 			if wsConn != nil {
-				// Create a high-level connection wrapper
-				pool := s.underlying.GetBufferPool()
-				hlConn := newConn(wsConn, pool)
-
 				// Find the appropriate handler based on the connection's path
-				handler := s.findHandler(wsConn.Path())
+				// For WebSocket connections, the method is always GET (for upgrade)
+				routeHandler, params := s.findHandler(wsConn.Path(), GET)
 
-				if handler != nil {
-					handler(hlConn)
+				if routeHandler != nil {
+					// Create a high-level connection wrapper with parameters
+					pool := s.underlying.GetBufferPool()
+					hlConn := newConnWithParams(wsConn, pool, params)
+
+					routeHandler.Handler(hlConn)
 				} else {
 					// No handler found, close connection or return error
+					// Create a basic connection just to close it
+					pool := s.underlying.GetBufferPool()
+					hlConn := newConn(wsConn, pool)
 					hlConn.Close()
 				}
 			}

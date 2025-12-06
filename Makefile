@@ -102,3 +102,16 @@ test-server:
 
 test-client:
 	$(GOTEST) -v ./lowlevel/client/...
+
+# Build examples
+build-examples:
+	$(GOBUILD) -v ./examples/...
+
+build-highlevel-examples:
+	$(GOBUILD) -v ./examples/highlevel/...
+
+build-param-routes-example:
+	$(GOBUILD) ./examples/highlevel/param_routes/
+
+build-http-methods-example:
+	$(GOBUILD) ./examples/highlevel/http_methods/

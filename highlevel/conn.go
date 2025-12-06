@@ -12,6 +12,12 @@ import (
 	"github.com/momentics/hioload-ws/protocol"
 )
 
+// RouteParam represents a parameter in a route pattern
+type RouteParam struct {
+	Key   string
+	Value string
+}
+
 // Conn represents a WebSocket connection with automatic resource management.
 type Conn struct {
 	// Low-level connection from hioload-ws (could be server or client connection)
@@ -36,6 +42,9 @@ type Conn struct {
 
 	// Client-specific fields (may be nil for server connections)
 	client *client.Client
+
+	// URL parameters extracted from the route
+	params []RouteParam
 }
 
 // newConn creates a new Conn wrapper around protocol.WSConnection
@@ -43,6 +52,18 @@ func newConn(underlying *protocol.WSConnection, pool api.BufferPool) *Conn {
 	return &Conn{
 		underlying:  underlying,
 		pool:        pool,
+		readLimit:   32 << 20, // 32MB default
+		autoRelease: true,
+		params:      make([]RouteParam, 0),
+	}
+}
+
+// newConnWithParams creates a new Conn wrapper with URL parameters
+func newConnWithParams(underlying *protocol.WSConnection, pool api.BufferPool, params []RouteParam) *Conn {
+	return &Conn{
+		underlying:  underlying,
+		pool:        pool,
+		params:      params,
 		readLimit:   32 << 20, // 32MB default
 		autoRelease: true,
 	}
@@ -56,6 +77,7 @@ func newClientConn(underlying *protocol.WSConnection, pool api.BufferPool, clien
 		client:      client,
 		readLimit:   32 << 20, // 32MB default
 		autoRelease: true,
+		params:      make([]RouteParam, 0),
 	}
 }
 
@@ -400,6 +422,25 @@ func (c *Conn) SetCloseCallback(callback func()) {
 	c.mutex.Lock()
 	c.onClose = callback
 	c.mutex.Unlock()
+}
+
+// Param gets the value of a parameter by name.
+func (c *Conn) Param(name string) string {
+	for _, param := range c.params {
+		if param.Key == name {
+			return param.Value
+		}
+	}
+	return ""
+}
+
+// AllParams returns all route parameters.
+func (c *Conn) AllParams() map[string]string {
+	result := make(map[string]string, len(c.params))
+	for _, param := range c.params {
+		result[param.Key] = param.Value
+	}
+	return result
 }
 
 // LocalAddr returns the local network address.
