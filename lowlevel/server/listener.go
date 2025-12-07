@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 
@@ -31,8 +32,8 @@ func (l *Listener) Accept() (*protocol.WSConnection, error) {
 	if err != nil {
 		return nil, err
 	}
-	// handshake
-	hdr, err := protocol.DoHandshakeCore(conn)
+	// handshake - use buffered version to preserve any data read after HTTP headers
+	hdr, _, br, err := protocol.DoHandshakeCoreBuffered(conn)
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("handshake req: %w", err)
@@ -41,8 +42,8 @@ func (l *Listener) Accept() (*protocol.WSConnection, error) {
 		conn.Close()
 		return nil, fmt.Errorf("handshake resp: %w", err)
 	}
-	// wrap transport
-	tr := &connTransport{conn: conn, pool: l.pool, numa: l.numaNode}
+	// wrap transport with buffered reader to not lose any data
+	tr := &bufferedConnTransport{conn: conn, br: br, pool: l.pool, numa: l.numaNode}
 	ws := protocol.NewWSConnection(tr, l.pool, l.chanCap)
 	// Don't call ws.Start() to prevent recvLoop/sendLoop that conflict with server's handleConnWithTracking
 	// Server will handle receive operations directly via RecvZeroCopy in handleConnWithTracking
@@ -54,14 +55,16 @@ func (l *Listener) Close() error {
 	return l.ln.Close()
 }
 
-// connTransport implements api.Transport over net.Conn.
-type connTransport struct {
+// bufferedConnTransport implements api.Transport over net.Conn with a bufio.Reader
+// to preserve any data buffered during handshake.
+type bufferedConnTransport struct {
 	conn net.Conn
+	br   *bufio.Reader
 	pool api.BufferPool
 	numa int
 }
 
-func (t *connTransport) Send(bufs [][]byte) error {
+func (t *bufferedConnTransport) Send(bufs [][]byte) error {
 	for _, b := range bufs {
 		if _, err := t.conn.Write(b); err != nil {
 			return err
@@ -70,10 +73,11 @@ func (t *connTransport) Send(bufs [][]byte) error {
 	return nil
 }
 
-func (t *connTransport) Recv() ([][]byte, error) {
+func (t *bufferedConnTransport) Recv() ([][]byte, error) {
 	buf := t.pool.Get(4096, t.numa)
 	data := buf.Bytes()
-	n, err := t.conn.Read(data)
+	// Read from buffered reader (which wraps conn) to get any buffered data first
+	n, err := t.br.Read(data)
 	if err != nil {
 		buf.Release()
 		return nil, err
@@ -81,10 +85,10 @@ func (t *connTransport) Recv() ([][]byte, error) {
 	return [][]byte{data[:n]}, nil
 }
 
-func (t *connTransport) Close() error {
+func (t *bufferedConnTransport) Close() error {
 	return t.conn.Close()
 }
 
-func (t *connTransport) Features() api.TransportFeatures {
+func (t *bufferedConnTransport) Features() api.TransportFeatures {
 	return api.TransportFeatures{ZeroCopy: true, Batch: false, NUMAAware: true}
 }

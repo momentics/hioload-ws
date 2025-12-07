@@ -8,6 +8,7 @@ package server
 
 import (
 	"context"
+	// "fmt" // DEBUG
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
@@ -136,27 +137,20 @@ func (s *Server) handleConnWithTracking(conn *protocol.WSConnection, poller api.
 		}
 	}()
 
-	// Use the connection's inbox channel to receive frames that are processed by recvLoop
-	// This avoids competing with recvLoop for transport data
+	// Server mode: recvLoop is NOT started, so we use RecvZeroCopy in Direct Mode
+	// which reads directly from the transport.
 	for {
-		select {
-		case <-conn.Done(): // Connection closed
+		bufs, err := conn.RecvZeroCopy()
+		if err != nil {
 			return
-		case frame := <-conn.GetInboxChan(): // Get frame from connection's inbox
-			if frame != nil {
-				// Convert frame payload to buffer for processing
-				buf := conn.BufferPool().Get(int(frame.PayloadLen), -1)
-				payloadBytes := buf.Bytes()
-				if len(payloadBytes) >= len(frame.Payload) {
-					copy(payloadBytes, frame.Payload)
-					// Push each buffer as a bufEvent into the reactor's inbox.
-					// Create an event that contains both the buffer and the connection context
-					event := bufEventWithConn{buf: buf, conn: conn}
-					poller.Push(event)
-				} else {
-					buf.Release() // Release if payload is too large for buffer
-				}
-			}
+		}
+		
+		for _, buf := range bufs {
+			// Push each buffer as a bufEvent into the reactor's inbox.
+			// Create an event that contains both the buffer and the connection context
+			// fmt.Println("DEBUG: Push to Poller")
+			event := bufEventWithConn{buf: buf, conn: conn}
+			poller.Push(event)
 		}
 	}
 }

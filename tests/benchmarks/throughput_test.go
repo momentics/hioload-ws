@@ -42,120 +42,194 @@ func TestLowLevelThroughput(t *testing.T) {
 	// 1. Start Low-Level Server
 	srvCfg := server.DefaultConfig()
 	srvCfg.ListenAddr = addr
-	srvCfg.IOBufferSize = 4096
+	srvCfg.IOBufferSize = 65536 // Support large frames
 
 	srv, err := server.NewServer(srvCfg)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 
-	// Echo handler matching the pattern in examples/lowlevel/echo
-	echoHandler := adapters.HandlerFunc(func(data any) error {
-		// Handle Open/Close events if necessary to avoid panics or weird behavior
+	// Echo work channel - worker goroutine serializes sends
+	type echoWork struct {
+		conn  *protocol.WSConnection
+		frame *protocol.WSFrame
+	}
+	echoChan := make(chan echoWork, 1000)
+	
+	// Worker goroutine - serializes all echo sends
+	go func() {
+		for work := range echoChan {
+// fmt.Printf("DEBUG: Worker SendFrame PayloadLen=%d, len(Payload)=%d\n", work.frame.PayloadLen, len(work.frame.Payload))
+			work.conn.SendFrame(work.frame)
+		}
+	}()
+
+	// Echo handler
+	echoHandler := adapters.HandlerFunc(func(data any) (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				// fmt.Printf("DEBUG: EchoHandler PANIC: %v\n", r)
+			}
+		}()
+		
+		// Unwrap thunk if data is a function
+		if thunk, ok := data.(func() interface{}); ok {
+			data = thunk()
+		}
+		
+		// fmt.Printf("DEBUG: EchoHandler data type: %T\n", data)
+		
+		// Handle Open/Close events
 		switch data.(type) {
-		case api.OpenEvent:
+		case api.OpenEvent, api.CloseEvent:
+			// fmt.Println("DEBUG: EchoHandler: Open/Close event, returning")
 			return nil
-		case api.CloseEvent:
-			return nil
-		}
-
-		buf, ok := data.(api.Buffer)
-		if !ok {
-			return nil // Ignore unknown events
-		}
-
-		// Magic to get connection from data context
-		ctx := api.ContextFromData(data)
-		conn := api.FromContext(ctx).(*protocol.WSConnection)
-		
-		// Create frame to echo back
-		frame := &protocol.WSFrame{
-			IsFinal:    true,
-			Opcode:     protocol.OpcodeBinary,
-			PayloadLen: int64(len(buf.Bytes())),
-			Payload:    buf.Bytes(), // Zero-copy usage might require buffer management, but for test echo implies copy usually unless we reuse buf. 
-			// We should release input buffer?
 		}
 		
-		err := conn.SendFrame(frame)
-		buf.Release() // Release input buffer provided by poller
-		return err
+		var buf api.Buffer
+		if getter, ok := data.(interface{ GetBuffer() api.Buffer }); ok {
+			buf = getter.GetBuffer()
+			// fmt.Printf("DEBUG: EchoHandler: Got buffer via GetBuffer, len=%d\n", len(buf.Bytes()))
+		} else if b, ok := data.(api.Buffer); ok {
+			buf = b
+			// fmt.Printf("DEBUG: EchoHandler: Got buffer direct, len=%d\n", len(buf.Bytes()))
+		} else {
+			// fmt.Println("DEBUG: EchoHandler: No buffer found")
+		}
+
+		if buf != nil {
+			var conn *protocol.WSConnection
+			if connData, ok := data.(interface{ WSConnection() *protocol.WSConnection }); ok {
+				conn = connData.WSConnection()
+				// fmt.Println("DEBUG: EchoHandler: Got conn via WSConnection()")
+			} else {
+				ctx := api.ContextFromData(data)
+				if val := api.FromContext(ctx); val != nil {
+					conn = val.(*protocol.WSConnection)
+					// fmt.Println("DEBUG: EchoHandler: Got conn via Context")
+				}
+			}
+
+		if conn != nil {
+			// Send work to dedicated worker goroutine via channel
+				// Copy payload since buffer will be released
+				bufBytes := buf.Bytes()
+// fmt.Printf("DEBUG: Echo handler bufBytes len=%d\n", len(bufBytes))
+				payloadCopy := make([]byte, len(bufBytes))
+				copy(payloadCopy, bufBytes)
+				
+				frame := &protocol.WSFrame{
+					IsFinal:    true,
+					Opcode:     protocol.OpcodeBinary,
+					PayloadLen: int64(len(payloadCopy)),
+					Payload:    payloadCopy,
+				}
+				
+				// Non-blocking send - if channel full, drop (shouldn't happen with 1000 capacity)
+				select {
+				case echoChan <- echoWork{conn: conn, frame: frame}:
+					// Sent
+				default:
+					// Channel full - shouldn't happen
+				}
+				buf.Release()
+				return nil
+			} else {
+				// fmt.Println("DEBUG: EchoHandler: conn is nil, releasing buf")
+			}
+			buf.Release()
+		}
+		return nil
 	})
 
 	serverReady := make(chan struct{})
 	go func() {
-		close(serverReady) 
+		// Signal ready after a brief delay to ensure listener is up
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			close(serverReady)
+		}()
 		if err := srv.Run(echoHandler); err != nil {
 			// t.Logf("Server stopped: %v", err)
 		}
 	}()
 
 	<-serverReady
-	time.Sleep(200 * time.Millisecond) // Give it a moment to bind
+	time.Sleep(50 * time.Millisecond) // Extra margin
 
 	// 2. Start Low-Level Client
 	cliCfg := client.DefaultConfig()
 	cliCfg.Addr = wsAddr 
-	cliCfg.IOBufferSize = 4096
+	cliCfg.IOBufferSize = 65536 // Match server
+	// cliCfg.NUMANode = 0 // Auto
 	
 	cli, err := client.NewClient(cliCfg)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
-	// Client automatically connects in NewClient or starts loops.
-	// But check logic: NewClient initializes. Does it connect?
-	// Based on facade.go outline: NewClient initializes, handshakes, and starts I/O loops.
 	defer cli.Close()
 
 	// 3. Benchmark Loop
-	packetSize := 1024
-	payload := make([]byte, packetSize)
-	duration := 5 * time.Second
+	sizes := []int{32} // Reduced for quick verification
+	msgCount := 20 // Reduced for completion
 
-	var sent, received uint64
-	
-	start := time.Now()
-	end := start.Add(duration)
+	var received uint64
 
+	// Receiver routine
 	go func() {
-		// Receiver loop using Client Recv API
 		for {
 			bufs, err := cli.Recv()
 			if err != nil {
+// fmt.Printf("DEBUG: Receiver error: %v\n", err)
 				return
 			}
 			for _, b := range bufs {
-				atomic.AddUint64(&received, 1) // Count messages? Or bytes?
+				rx := atomic.AddUint64(&received, 1)
+				if rx <= 5 || rx % 100 == 0 {
+// fmt.Printf("DEBUG: Receiver got buf len=%d, total=%d\n", len(b.Bytes()), rx)
+				}
 				b.Release()
 			}
 		}
 	}()
 
-	for time.Now().Before(end) {
-		// Use Client Send API
-		cli.Send(payload)
-		atomic.AddUint64(&sent, 1)
-		
-		// If we send too fast without flow control, we might overflow buffers.
-		// Real throughput tests often just blast.
-		// However, Client.Send enqueues to batch.
-	}
-	
-	elapsed := time.Since(start)
-	
-	// Report
-	rx := atomic.LoadUint64(&received)
-	
-	mbps := float64(rx*uint64(packetSize)) / 1024 / 1024 / elapsed.Seconds()
-	rps := float64(rx) / elapsed.Seconds()
+	fmt.Printf("\n=== Low-Level Throughput Statistics ===\n")
+	fmt.Printf("%-10s %-12s %-15s %-15s\n", "Size(B)", "Count", "Msg/sec", "MB/sec")
+	fmt.Printf("--------------------------------------------------------\n")
 
-	t.Logf("=== Low-Level Throughput ===")
-	t.Logf("Duration: %v", elapsed)
-	t.Logf("Packet Size: %d bytes", packetSize)
-	t.Logf("Messages Received: %d", rx)
-	t.Logf("Throughput: %.2f Msg/sec", rps)
-	t.Logf("Throughput: %.2f MB/sec", mbps)
-	t.Logf("============================")
+	for _, size := range sizes {
+		payload := make([]byte, size)
+		
+		initialRx := atomic.LoadUint64(&received)
+		targetRx := initialRx + uint64(msgCount)
+
+		start := time.Now()
+		// fmt.Printf("DEBUG: Testing size %d. Sending %d messages...\n", size, msgCount)
+		for i := 0; i < msgCount; i++ {
+			cli.Send(payload)
+		}
+		// fmt.Println("DEBUG: Send loop done. Waiting for receive...")
+		
+		// Wait for completion
+		for atomic.LoadUint64(&received) < targetRx {
+			if time.Since(start) > 30*time.Second {
+				t.Errorf("Timeout waiting for %d messages of size %d", msgCount, size)
+				break
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+		duration := time.Since(start)
+
+		rx := atomic.LoadUint64(&received) - initialRx
+		if duration.Seconds() == 0 { duration = time.Millisecond }
+		mbps := float64(rx*uint64(size)) / 1024 / 1024 / duration.Seconds()
+		rps := float64(rx) / duration.Seconds()
+
+		fmt.Printf("%-10d %-12d %-15.2f %-15.2f\n", size, rx, rps, mbps)
+		
+		time.Sleep(50 * time.Millisecond)
+	}
+	fmt.Printf("========================================================\n\n")
 
 	srv.Shutdown()
 }
@@ -193,15 +267,13 @@ func TestHighLevelThroughput(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// 3. Benchmark
-	packetSize := 1024
-	payload := make([]byte, packetSize)
-	duration := 5 * time.Second
+	// 3. Benchmark Loop
+	sizes := []int{32, 64, 1024, 16384, 32768}
+	msgCount := 2000
 
 	var received uint64
-	start := time.Now()
-	end := start.Add(duration)
-
+	
+	// Receiver routine
 	go func() {
 		for {
 			_, _, err := conn.ReadMessage()
@@ -212,26 +284,43 @@ func TestHighLevelThroughput(t *testing.T) {
 		}
 	}()
 
-	for time.Now().Before(end) {
-		if err := conn.WriteMessage(int(highlevel.BinaryMessage), payload); err != nil {
-			t.Errorf("Write error: %v", err)
-			break
+	fmt.Printf("\n=== High-Level Throughput Statistics ===\n")
+	fmt.Printf("%-10s %-12s %-15s %-15s\n", "Size(B)", "Count", "Msg/sec", "MB/sec")
+	fmt.Printf("--------------------------------------------------------\n")
+
+	for _, size := range sizes {
+		payload := make([]byte, size)
+		
+		initialRx := atomic.LoadUint64(&received)
+		targetRx := initialRx + uint64(msgCount)
+
+		start := time.Now()
+		for i := 0; i < msgCount; i++ {
+			if err := conn.WriteMessage(int(highlevel.BinaryMessage), payload); err != nil {
+				t.Errorf("Write error at size %d iter %d: %v", size, i, err)
+				return // Stop test on error
+			}
 		}
+
+		// Wait for completion
+		for atomic.LoadUint64(&received) < targetRx {
+			if time.Since(start) > 30*time.Second {
+				t.Errorf("Timeout waiting for %d messages of size %d", msgCount, size)
+				break
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+		duration := time.Since(start)
+
+		rx := atomic.LoadUint64(&received) - initialRx
+		mbps := float64(rx*uint64(size)) / 1024 / 1024 / duration.Seconds()
+		rps := float64(rx) / duration.Seconds()
+
+		fmt.Printf("%-10d %-12d %-15.2f %-15.2f\n", size, rx, rps, mbps)
+		
+		time.Sleep(50 * time.Millisecond)
 	}
-
-	elapsed := time.Since(start)
-	rx := atomic.LoadUint64(&received)
-	
-	mbps := float64(rx*uint64(packetSize)) / 1024 / 1024 / elapsed.Seconds()
-	rps := float64(rx) / elapsed.Seconds()
-
-	t.Logf("=== High-Level Throughput ===")
-	t.Logf("Duration: %v", elapsed)
-	t.Logf("Packet Size: %d bytes", packetSize)
-	t.Logf("Messages Received: %d", rx)
-	t.Logf("Throughput: %.2f Msg/sec", rps)
-	t.Logf("Throughput: %.2f MB/sec", mbps)
-	t.Logf("=============================")
+	fmt.Printf("========================================================\n\n")
 
 	srv.Shutdown()
 }

@@ -23,6 +23,10 @@ func NewTransport(conn net.Conn, bp api.BufferPool, bufSize int) api.Transport {
     return &transport{conn: conn, bufPool: bp, bufSize: bufSize}
 }
 
+func (t *transport) GetBuffer() api.Buffer {
+	return t.bufPool.Get(t.bufSize, -1)
+}
+
 func (t *transport) Send(bufs [][]byte) error {
     for _, b := range bufs {
         if _, err := t.conn.Write(b); err != nil {

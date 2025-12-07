@@ -82,9 +82,13 @@ func NewClient(cfg *Config) (*Client, error) {
 	// Try optimized "raw" client first (avoids Windows IOCP conflict)
 	tf := internal_transport.NewTransportFactory(cfg.IOBufferSize, cfg.NUMANode)
 	tr, err := tf.CreateClient(u.Host)
+	// UNCOMMENT ABOVE LINE TO USE OPTIMIZED TRANSPORT
+	// var tr api.Transport = nil
+	// err = fmt.Errorf("disabled")
+	// _ = tf // suppress unused warning
 
 	if err == nil {
-		fmt.Printf("DEBUG: Created optimized raw client transport.\n")
+		// fmt.Printf("DEBUG: Created optimized raw client transport.\n")
 
 		// We have a transport, but we need to do the HTTP handshake.
 		// Construct a dummy net.Conn adapter for the protocol handshake functions.
@@ -125,13 +129,19 @@ func NewClient(cfg *Config) (*Client, error) {
 
 	} else {
 		// Fallback to net.Dial
-		fmt.Printf("DEBUG: Optimized client creation failed: %v. Using net.Dial.\n", err)
+		// fmt.Printf("DEBUG: Optimized client creation failed: %v. Using net.Dial.\n", err)
 		netConn, err := net.Dial("tcp", u.Host)
 		if err != nil {
 			return nil, fmt.Errorf("dial error: %w", err)
 		}
+		
+		// Disable Nagle's algorithm for low-latency small packet transmission
+		if tc, ok := netConn.(*net.TCPConn); ok {
+			tc.SetNoDelay(true)
+		}
 
 		// Perform HTTP handshake on net.Conn
+		// fmt.Println("DEBUG: Fallback Handshake Start")
 		key := make([]byte, 16)
 		rand.Read(key)
 		secKey := base64.StdEncoding.EncodeToString(key)
@@ -146,14 +156,28 @@ func NewClient(cfg *Config) (*Client, error) {
 				"Sec-WebSocket-Version": {"13"},
 			},
 		}
-		if err := protocol.WriteHandshakeRequest(netConn, req); err != nil {
+		// Use manual string construction to match optimized path and avoid req.Write quirks
+		path := u.Path
+		if path == "" {
+			path = "/"
+		}
+		reqStr := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", path, u.Host, secKey)
+		// fmt.Printf("DEBUG: Request string length: %d\n", len(reqStr))
+		
+		if _, err := netConn.Write([]byte(reqStr)); err != nil {
 			netConn.Close()
 			return nil, err
 		}
+		// fmt.Println("DEBUG: Fallback Handshake Request Sent (Manual Fixed Path)")
+		
+		// Set timeout for handshake response
+		netConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		if err := protocol.DoClientHandshake(netConn, req); err != nil {
 			netConn.Close()
-			return nil, err
+			return nil, fmt.Errorf("fallback handshake failed: %w", err)
 		}
+		netConn.SetReadDeadline(time.Time{}) // Clear deadline
+		// fmt.Println("DEBUG: Fallback Handshake Done")
 
 		// Wrap
 		tr = NewTransport(netConn, mgr.GetPool(cfg.IOBufferSize, cfg.NUMANode), cfg.IOBufferSize)
@@ -175,9 +199,10 @@ func NewClient(cfg *Config) (*Client, error) {
 		ctx:       ctx,
 		cancel:    cancel,
 	}
-	client.wg.Add(2)
+	client.wg.Add(1) // Only sendLoop, recvLoop is handled by WSConnection.Start()
 	go client.sendLoop()
-	go client.recvLoop()
+	// NOTE: Don't spawn client.recvLoop() as WSConnection.Start() already runs its own recvLoop
+	// which reads from transport and pushes to inbox. Client.Recv() reads from inbox.
 	if cfg.Heartbeat > 0 {
 		client.wg.Add(1)
 		go client.heartbeatLoop()
@@ -232,13 +257,47 @@ func (t *transportAdapter) WriteRaw(p []byte) error {
 }
 
 // Send enqueues a binary message for batch transmission.
+// Send enqueues a binary message for batch transmission.
 func (c *Client) Send(msg []byte) {
-	buf := c.conn.Transport().(interface{ GetBuffer() api.Buffer }).GetBuffer()
-	copy(buf.Bytes(), msg)
+	// Frame the message
+	frame := &protocol.WSFrame{
+		IsFinal:    true,
+		Opcode:     protocol.OpcodeBinary,
+		Masked:     true,
+		PayloadLen: int64(len(msg)),
+		Payload:    msg,
+	}
+
+	raw, err := protocol.EncodeFrameToBytesWithMask(frame, true)
+	if err != nil {
+		// Drop message on error (or log?)
+		return
+	}
+
+	// Use custom buffer to avoid pool pollution with variable sizes
+	buf := &frameBuffer{data: raw}
 	c.sendBatch.Append(buf)
 	if c.sendBatch.Len() >= c.cfg.BatchSize {
 		c.flush()
 	}
+}
+
+// frameBuffer implements api.Buffer for correct framing without pool pollution
+type frameBuffer struct {
+	data []byte
+}
+
+func (b *frameBuffer) Bytes() []byte { return b.data }
+func (b *frameBuffer) Release()      {} // No-op, GC handles it
+func (b *frameBuffer) Copy() []byte {
+	c := make([]byte, len(b.data))
+	copy(c, b.data)
+	return c
+}
+func (b *frameBuffer) NUMANode() int { return -1 }
+func (b *frameBuffer) Capacity() int { return cap(b.data) }
+func (b *frameBuffer) Slice(from, to int) api.Buffer {
+	return &frameBuffer{data: b.data[from:to]}
 }
 
 // Recv returns next batch of frames or error.
@@ -368,7 +427,10 @@ func (c *Client) flush() {
 		bufs = append(bufs, b.Bytes())
 	}
 	if err := c.transport.Send(bufs); err != nil {
+		// fmt.Printf("DEBUG: flush Send error: %v\n", err)
 		// handle error/log
+	} else {
+		// fmt.Printf("DEBUG: flush Sent batch size %d\n", len(batch))
 	}
 	for _, b := range batch {
 		b.Release()

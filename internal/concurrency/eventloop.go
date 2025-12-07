@@ -143,13 +143,13 @@ func (el *EventLoop) Pending() int {
 }
 
 // Push adds an event to the event loop's inbox for processing.
-// Non-blocking, returns false if inbox is full.
+// Blocking, returns false if loop is stopped.
 func (el *EventLoop) Push(ev Event) bool {
 	select {
 	case el.inbox <- ev:
 		return true
-	default:
-		return false // inbox is full
+	case <-el.quitCh:
+		return false // loop stopped
 	}
 }
 

@@ -49,7 +49,7 @@ coverage:
 
 # Run benchmarks
 benchmark:
-	$(GOTEST) -bench=. -run=^$$ ./tests/benchmarks/...
+	$(GOTEST) -v ./tests/benchmarks/...
 
 # Run all benchmarks
 benchmark-all:

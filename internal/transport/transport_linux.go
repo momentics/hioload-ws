@@ -685,7 +685,7 @@ func (et *epollTransport) Recv() ([][]byte, error) {
 	fd := et.fd
 	et.mu.Unlock()
 
-	batch := 16
+	batch := 1 // Reduced from 16 to minimize allocation overhead
 	bufs := make([][]byte, batch)
 	for i := range bufs {
 		buf := et.bufPool.Get(et.ioBufferSize, et.numaNode)
@@ -696,6 +696,7 @@ func (et *epollTransport) Recv() ([][]byte, error) {
 	// Since fd is non-blocking (O_NONBLOCK), we must poll if checks fail.
 	for {
 		// Try to read
+// fmt.Printf("DEBUG: epoll Recv trying RecvmsgBuffers on fd=%d\n", fd)
 		n, _, _, _, err := unix.RecvmsgBuffers(fd, bufs, nil, 0)
 		if err != nil {
 			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {

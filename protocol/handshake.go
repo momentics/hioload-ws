@@ -95,6 +95,59 @@ func DoHandshakeCoreWithPath(r io.Reader) (http.Header, string, error) {
 	return hdr, req.URL.Path, nil
 }
 
+// DoHandshakeCoreBuffered reads and validates the HTTP/1.1 Upgrade request from r.
+// Returns the headers, path, and the bufio.Reader (which may contain buffered data).
+// IMPORTANT: Caller must use the returned bufio.Reader for all subsequent reads
+// to avoid losing any data that was buffered during HTTP parsing.
+func DoHandshakeCoreBuffered(r io.Reader) (http.Header, string, *bufio.Reader, error) {
+	br := bufio.NewReader(r)
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("handshake read request: %w", err)
+	}
+
+	// Enforce a maximum total header size to prevent abuse.
+	total := 0
+	for k, vs := range req.Header {
+		total += len(k)
+		for _, v := range vs {
+			total += len(v)
+			if total > MaxHandshakeHeadersSize {
+				return nil, "", nil, fmt.Errorf("handshake headers too large")
+			}
+		}
+	}
+
+	// Validate required upgrade tokens.
+	if !headerContainsToken(req.Header, HeaderConnection, "Upgrade") ||
+		!headerContainsToken(req.Header, HeaderUpgrade, "websocket") {
+		return nil, "", nil, ErrInvalidUpgradeHeaders
+	}
+
+	// Verify WebSocket version.
+	if req.Header.Get(HeaderSecWebSocketVer) != RequiredWebSocketVersion {
+		return nil, "", nil, ErrBadWebSocketVersion
+	}
+
+	// Extract client key.
+	key := req.Header.Get(HeaderSecWebSocketKey)
+	if key == "" {
+		return nil, "", nil, ErrMissingWebSocketKey
+	}
+
+	// Compute the Sec-WebSocket-Accept.
+	h := sha1.New()
+	h.Write([]byte(key + WebSocketGUID))
+	accept := base64.StdEncoding.EncodeToString(h.Sum(nil))
+
+	// Prepare response headers.
+	hdr := make(http.Header)
+	hdr.Set("Upgrade", "websocket")
+	hdr.Set("Connection", "Upgrade")
+	hdr.Set("Sec-WebSocket-Accept", accept)
+	return hdr, req.URL.Path, br, nil
+}
+
 // WriteHandshakeResponse writes the HTTP/1.1 101 Switching Protocols response
 // with the provided headers to w. Caller must include required headers.
 func WriteHandshakeResponse(w io.Writer, hdr http.Header) error {

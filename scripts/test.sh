@@ -149,12 +149,9 @@ else
 fi
 
 # Run benchmarks if requested
-print_status "Running benchmarks..."
-if [ "$VERBOSE" = true ]; then
-    go test -bench=. -run=^$ ./tests/benchmarks/...
-else
-    go test -bench=. -run=^$ ./tests/benchmarks/... 2>/dev/null
-fi
+print_status "Running throughput benchmarks..."
+# Always run with -v to show the stats table
+go test -v ./tests/benchmarks/...
 
 # Generate coverage report if requested
 if [ "$COVERAGE" = true ]; then

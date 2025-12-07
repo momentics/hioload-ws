@@ -19,9 +19,13 @@ const MaxFramePayload = 1 << 20 // 1 MiB
 
 // DecodeFrameFromBytes parses raw WebSocket frame into WSFrame,
 // enforcing maximum payload size.
-func DecodeFrameFromBytes(raw []byte) (*WSFrame, error) {
+// DecodeFrameFromBytes parses raw WebSocket frame into WSFrame,
+// enforcing maximum payload size.
+// Returns frame, consumed bytes, and error.
+// If frame is incomplete, returns (nil, 0, nil).
+func DecodeFrameFromBytes(raw []byte) (*WSFrame, int, error) {
 	if len(raw) < 2 {
-		return nil, errors.New("frame too short")
+		return nil, 0, nil // Incomplete
 	}
 	fin := raw[0]&0x80 != 0
 	opcode := raw[0] & 0x0F
@@ -32,36 +36,37 @@ func DecodeFrameFromBytes(raw []byte) (*WSFrame, error) {
 	switch length {
 	case 126:
 		if len(raw) < offset+2 {
-			return nil, errors.New("frame too short for extended payload length")
+			return nil, 0, nil // Incomplete
 		}
 		length = int64(binary.BigEndian.Uint16(raw[offset:]))
 		offset += 2
 	case 127:
 		if len(raw) < offset+8 {
-			return nil, errors.New("frame too short for extended payload length")
+			return nil, 0, nil // Incomplete
 		}
 		length = int64(binary.BigEndian.Uint64(raw[offset:]))
 		offset += 8
 	}
 
 	if length > MaxFramePayload {
-		return nil, errors.New("frame payload exceeds maximum allowed size")
+		return nil, 0, errors.New("frame payload exceeds maximum allowed size")
 	}
 
 	var maskKey [4]byte
 	if masked {
 		if len(raw) < offset+4 {
-			return nil, errors.New("frame too short for mask key")
+			return nil, 0, nil // Incomplete
 		}
 		copy(maskKey[:], raw[offset:offset+4])
 		offset += 4
 	}
 
-	if int64(len(raw[offset:])) < length {
-		return nil, errors.New("payload truncated")
+	totalLen := offset + int(length)
+	if len(raw) < totalLen {
+		return nil, 0, nil // Incomplete
 	}
-	payloadData := raw[offset : offset+int(length)]
 
+	payloadData := raw[offset : totalLen]
 	payload := make([]byte, length)
 	if masked {
 		for i := int64(0); i < length; i++ {
@@ -78,7 +83,7 @@ func DecodeFrameFromBytes(raw []byte) (*WSFrame, error) {
 		PayloadLen: length,
 		MaskKey:    maskKey,
 		Payload:    payload,
-	}, nil
+	}, totalLen, nil
 }
 
 // EncodeFrameToBytes serializes WSFrame into []byte,

@@ -10,6 +10,7 @@
 package transport
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"net"
@@ -66,6 +67,7 @@ func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 	if wsl.closed {
 		return nil, ErrListenerClosed
 	}
+	// fmt.Println("DEBUG: Server Accept waiting for connection")
 	tcpConn, err := wsl.listener.Accept()
 	if err != nil {
 		if strings.Contains(err.Error(), "closed network connection") {
@@ -73,35 +75,32 @@ func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 		}
 		return nil, err
 	}
+	// fmt.Println("DEBUG: Server Accept got connection")
+	
+	// Disable Nagle's algorithm for low-latency small packet transmission
+	if tc, ok := tcpConn.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
 
-	// Extract request path during handshake
-	hdrs, path, err := protocol.DoHandshakeCoreWithPath(tcpConn)
+	// Use buffered handshake to preserve any data read after HTTP headers
+	hdrs, path, br, err := protocol.DoHandshakeCoreBuffered(tcpConn)
 	if err != nil {
 		tcpConn.Close()
 		return nil, fmt.Errorf("handshake request failed: %w", err)
 	}
+	// fmt.Println("DEBUG: Server handshake request parsed")
 	if err := protocol.WriteHandshakeResponse(tcpConn, hdrs); err != nil {
 		tcpConn.Close()
 		return nil, fmt.Errorf("handshake response failed: %w", err)
 	}
-	if err := protocol.WriteHandshakeResponse(tcpConn, hdrs); err != nil {
-		tcpConn.Close()
-		return nil, fmt.Errorf("handshake response failed: %w", err)
-	}
+	// fmt.Println("DEBUG: Server handshake response written")
 
-	// Upgrade to optimized transport if possible
-	tf := NewTransportFactory(4096, wsl.numaNode)
-	tr, err := tf.CreateFromConn(tcpConn)
-	if err != nil {
-		// Fallback
-		fmt.Printf("DEBUG: Server transport upgrade failed: %v. Using default.\n", err)
-		tr = &connTransport{
-			conn:       tcpConn,
-			bufferPool: wsl.bufferPool,
-			numaNode:   wsl.numaNode,
-		}
-	} else {
-		// fmt.Printf("DEBUG: Server successfully upgraded to optimized transport.\n")
+	// Use buffered transport to preserve any data buffered during handshake
+	tr := &bufferedConnTransport{
+		conn:       tcpConn,
+		br:         br,
+		bufferPool: wsl.bufferPool,
+		numaNode:   wsl.numaNode,
 	}
 	wsConn := protocol.NewWSConnectionWithPath(tr, wsl.bufferPool, wsl.channelSize, path)
 	return wsConn, nil
@@ -118,15 +117,17 @@ func (wsl *WebSocketListener) Close() error {
 
 var ErrListenerClosed = errors.New("listener closed")
 
-// connTransport implements api.Transport over net.Conn, NUMA-aware and pooled.
-type connTransport struct {
+// bufferedConnTransport implements api.Transport over net.Conn with a bufio.Reader
+// to preserve any data buffered during handshake.
+type bufferedConnTransport struct {
 	conn       net.Conn
+	br         *bufio.Reader
 	bufferPool api.BufferPool
 	numaNode   int
 	closed     bool
 }
 
-func (t *connTransport) Send(buffers [][]byte) error {
+func (t *bufferedConnTransport) Send(buffers [][]byte) error {
 	if t.closed {
 		return api.ErrTransportClosed
 	}
@@ -137,28 +138,32 @@ func (t *connTransport) Send(buffers [][]byte) error {
 	}
 	return nil
 }
-func (t *connTransport) Recv() ([][]byte, error) {
+
+func (t *bufferedConnTransport) Recv() ([][]byte, error) {
 	if t.closed {
 		return nil, api.ErrTransportClosed
 	}
 	// Allocate buffer from concrete NUMA node pool.
-	buf := t.bufferPool.Get(4096, t.numaNode)
+	buf := t.bufferPool.Get(8192, t.numaNode) // Increased from 4096 for efficiency
 	data := buf.Bytes()
-	n, err := t.conn.Read(data)
+	// Read from buffered reader to get any data buffered during handshake
+	n, err := t.br.Read(data)
 	if err != nil {
 		buf.Release()
 		return nil, fmt.Errorf("read: %w", err)
 	}
 	return [][]byte{data[:n]}, nil
 }
-func (t *connTransport) Close() error {
+
+func (t *bufferedConnTransport) Close() error {
 	if t.closed {
 		return nil
 	}
 	t.closed = true
 	return t.conn.Close()
 }
-func (t *connTransport) Features() api.TransportFeatures {
+
+func (t *bufferedConnTransport) Features() api.TransportFeatures {
 	return api.TransportFeatures{
 		ZeroCopy:  true,
 		Batch:     false,
