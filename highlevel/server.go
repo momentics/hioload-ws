@@ -13,22 +13,22 @@ import (
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/protocol"
 	"github.com/momentics/hioload-ws/lowlevel/server"
+	"github.com/momentics/hioload-ws/protocol"
 )
 
 // HTTPMethod represents an HTTP method
 type HTTPMethod string
 
 const (
-	GET    HTTPMethod = "GET"
-	POST   HTTPMethod = "POST"
-	PUT    HTTPMethod = "PUT"
-	PATCH  HTTPMethod = "PATCH"
-	DELETE HTTPMethod = "DELETE"
-	HEAD   HTTPMethod = "HEAD"
+	GET     HTTPMethod = "GET"
+	POST    HTTPMethod = "POST"
+	PUT     HTTPMethod = "PUT"
+	PATCH   HTTPMethod = "PATCH"
+	DELETE  HTTPMethod = "DELETE"
+	HEAD    HTTPMethod = "HEAD"
 	OPTIONS HTTPMethod = "OPTIONS"
-	TRACE  HTTPMethod = "TRACE"
+	TRACE   HTTPMethod = "TRACE"
 )
 
 // RouteHandler holds both the WebSocket handler and the allowed HTTP methods
@@ -55,7 +55,7 @@ var (
 // Server wraps the low-level server with a high-level API.
 type Server struct {
 	addr       string
-	handlers   map[string]*RouteHandler  // Exact path handlers with HTTP methods
+	handlers   map[string]*RouteHandler // Exact path handlers with HTTP methods
 	handlerMux sync.RWMutex
 	opts       []server.ServerOption
 	// Reference to the underlying server
@@ -71,7 +71,7 @@ type Server struct {
 	// Path patterns for route matching
 	patterns map[*regexp.Regexp]*RouteHandler
 	// Route patterns with parameter names (for named parameter extraction)
-	routePatterns map[string][]string  // maps pattern to parameter names
+	routePatterns map[string][]string // maps pattern to parameter names
 	// Store allowed methods for each pattern (for error responses)
 	patternMethods map[*regexp.Regexp][]HTTPMethod
 	// Middleware chain
@@ -493,7 +493,7 @@ func (s *Server) ListenAndServe() error {
 	basicHandler := adapters.HandlerFunc(func(data any) error {
 		// fmt.Printf("DEBUG: basicHandler called with type: %T\n", data)
 		var buf api.Buffer
-		
+
 		// Unpack buffer from data
 		if getter, ok := data.(interface{ GetBuffer() api.Buffer }); ok {
 			buf = getter.GetBuffer()
@@ -501,7 +501,7 @@ func (s *Server) ListenAndServe() error {
 			buf = b
 		}
 
-		if buf != nil {
+		if buf.Data != nil {
 			// This is a message from a connection
 			var wsConn *protocol.WSConnection
 
@@ -536,7 +536,7 @@ func (s *Server) ListenAndServe() error {
 					hlConn.Close()
 				}
 			}
-			
+
 			// Release the buffer since we're done with it
 			buf.Release()
 		}
@@ -608,14 +608,14 @@ func (s *Server) Shutdown() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	
+
 	// Close all tracked connections
 	s.connectionsMu.Lock()
 	for conn := range s.connections {
 		conn.Close()
 	}
 	s.connectionsMu.Unlock()
-	
+
 	return nil
 }
 

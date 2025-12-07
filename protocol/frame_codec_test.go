@@ -19,7 +19,7 @@ func TestEncodeDecodeFrame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := protocol.DecodeFrameFromBytes(data)
+	got, _, err := protocol.DecodeFrameFromBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}

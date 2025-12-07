@@ -36,7 +36,7 @@ func TestBufferPoolProtocolIntegration(t *testing.T) {
 	// Send a frame and track successful operations
 	sendErrors := 0
 	successfulSends := 0
-	
+
 	err := conn.SendFrame(frame)
 	if err != nil {
 		sendErrors++
@@ -86,10 +86,10 @@ func TestProtocolTransportIntegration(t *testing.T) {
 
 	// Test send operation and measure success
 	startTime := time.Now()
-	
+
 	sendErr := conn.SendFrame(frame)
 	elapsed := time.Since(startTime)
-	
+
 	if sendErr != nil {
 		t.Errorf("Protocol-transport integration failed to send frame: %v", sendErr)
 	} else {
@@ -136,7 +136,7 @@ func TestBufferPoolSlabIntegration(t *testing.T) {
 
 		// Get buffer from pool 0
 		buf0 := pool0.Get(size, 0)
-		if buf0 == nil {
+		if buf0.Data == nil {
 			errorCount++
 			t.Errorf("Failed to get buffer of size %d from pool 0", size)
 		} else {
@@ -160,7 +160,7 @@ func TestBufferPoolSlabIntegration(t *testing.T) {
 
 		// Get buffer from pool 1
 		buf1 := pool1.Get(size, 1)
-		if buf1 == nil {
+		if buf1.Data == nil {
 			errorCount++
 			t.Errorf("Failed to get buffer of size %d from pool 1", size)
 		} else {
@@ -176,7 +176,7 @@ func TestBufferPoolSlabIntegration(t *testing.T) {
 	}
 
 	// Calculate success rate - note that we have 2 pools (pool0 and pool1) so total successful should be 2x the number of sizes
-	expectedSuccessful := len(sizes) * 2  // 2 pools per size
+	expectedSuccessful := len(sizes) * 2 // 2 pools per size
 	successRate := float64(successfulAllocations) / float64(expectedSuccessful) * 100
 	if successRate != 100.0 {
 		t.Errorf("Buffer pool slab integration success rate: %.2f%% (failed %d out of %d allocations)", successRate, errorCount, expectedSuccessful)
@@ -211,19 +211,19 @@ func TestRealWorldScenario(t *testing.T) {
 		// Send multiple frames
 		for j := 0; j < 5; j++ {
 			totalOperations++
-			
+
 			frame := &protocol.WSFrame{
 				IsFinal:    true,
 				Opcode:     protocol.OpcodeBinary,
 				PayloadLen: int64(64),
 				Payload:    make([]byte, 64),
 			}
-			
+
 			// Fill payload with pattern
 			for k := range frame.Payload {
 				frame.Payload[k] = byte((i*100 + j*10 + k) % 256)
 			}
-			
+
 			err := conn.SendFrame(frame)
 			if err != nil {
 				errorOperations++
@@ -242,7 +242,7 @@ func TestRealWorldScenario(t *testing.T) {
 	if errorOperations > 0 {
 		t.Errorf("Expected 0 errors, got %d errors", errorOperations)
 	}
-	
+
 	if successRate != 100.0 {
 		t.Errorf("Expected 100%% success rate, got %.2f%%", successRate)
 	} else {
@@ -269,7 +269,7 @@ func TestConcurrentAccess(t *testing.T) {
 		go func(workerID int) {
 			for op := 0; op < opsPerWorker; op++ {
 				buf := bufPool.Get(256, 0)
-				if buf == nil {
+				if buf.Data == nil {
 					results <- false // Operation failed
 				} else {
 					// Do some work with buffer
@@ -277,7 +277,7 @@ func TestConcurrentAccess(t *testing.T) {
 					if len(bufData) >= 10 {
 						copy(bufData[:10], []byte("test data"))
 					}
-					buf.Release() // Important: release buffer back to pool
+					buf.Release()   // Important: release buffer back to pool
 					results <- true // Operation succeeded
 				}
 			}
@@ -297,14 +297,14 @@ func TestConcurrentAccess(t *testing.T) {
 	// Calculate success rate
 	successRate := float64(successfulOps) / float64(totalOps) * 100
 	errors := totalOps - successfulOps
-	
+
 	t.Logf("Concurrent access test: %d operations, %d successful, %d errors", totalOps, successfulOps, errors)
 	t.Logf("Success rate: %.2f%%", successRate)
 
 	if errors > 0 {
 		t.Errorf("Concurrent access test had %d errors, expected 0", errors)
 	}
-	
+
 	if successRate != 100.0 {
 		t.Errorf("Expected 100%% success rate in concurrent access, got %.2f%%", successRate)
 	} else {

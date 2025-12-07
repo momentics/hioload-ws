@@ -25,7 +25,6 @@ func main() {
 	server := highlevel.NewServer(addr)
 
 	// Configure server options (apply them via functional options pattern)
-	server = server // Assign to avoid unused variable warning
 
 	// Apply options (this would typically be done differently but for example)
 	// In our current implementation, we need to apply these before starting

@@ -4,95 +4,61 @@ import (
 	"github.com/momentics/hioload-ws/api"
 )
 
-// FakeBuffer implements api.Buffer for testing.
-type FakeBuffer struct {
-	Data     []byte
+// FakePool implements api.Releaser and api.BufferPool for testing.
+type FakePool struct {
+	Size     int
+	Returned []api.Buffer
 	Node     int
-	Released bool
 }
 
-// NewFakeBuffer creates a new fake buffer.
-func NewFakeBuffer(size int, node int) *FakeBuffer {
-	return &FakeBuffer{
-		Data:     make([]byte, size),
-		Node:     node,
-		Released: false,
+// NewFakePool creates a new fake buffer pool.
+func NewFakePool(size int) *FakePool {
+	return &FakePool{
+		Size:     size,
+		Returned: make([]api.Buffer, 0),
 	}
 }
 
-func (fb *FakeBuffer) Bytes() []byte {
-	return fb.Data
+// Put implements api.Releaser and api.BufferPool.
+func (fp *FakePool) Put(b api.Buffer) {
+	fp.Returned = append(fp.Returned, b)
 }
 
-func (fb *FakeBuffer) Slice(from, to int) api.Buffer {
-	if from < 0 || to > len(fb.Data) || from > to {
-		return nil
-	}
-	return &FakeBuffer{
-		Data:     fb.Data[from:to],
-		Node:     fb.Node,
-		Released: fb.Released,
-	}
-}
-
-func (fb *FakeBuffer) Release() {
-	fb.Released = true
-}
-
-func (fb *FakeBuffer) Copy() []byte {
-	cp := make([]byte, len(fb.Data))
-	copy(cp, fb.Data)
-	return cp
-}
-
-func (fb *FakeBuffer) NUMANode() int {
-	return fb.Node
-}
-
-func (fb *FakeBuffer) Capacity() int {
-	return len(fb.Data)
-}
-
-func (fb *FakeBuffer) IsReleased() bool {
-	return fb.Released
-}
-
-// FakeBufferPool implements api.BufferPool for testing.
-type FakeBufferPool struct {
-	Size   int
-	Pools  []api.Buffer
-	Buffer *FakeBuffer
-}
-
-// NewFakeBufferPool creates a new fake buffer pool.
-func NewFakeBufferPool(size int) *FakeBufferPool {
-	return &FakeBufferPool{
-		Size: size,
-		Buffer: &FakeBuffer{
-			Data: make([]byte, size),
-			Node: 0,
-		},
+// Get implements api.BufferPool.
+func (fp *FakePool) Get(size int, numaPreferred int) api.Buffer {
+	return api.Buffer{
+		Data:  make([]byte, size),
+		NUMA:  numaPreferred,
+		Pool:  fp,
+		Class: size,
 	}
 }
 
-func (fbp *FakeBufferPool) Get(size int, numaPreferred int) api.Buffer {
-	if size <= fbp.Size {
-		return &FakeBuffer{
-			Data: make([]byte, size),
-			Node: numaPreferred,
+func (fp *FakePool) Stats() api.BufferPoolStats {
+	return api.BufferPoolStats{}
+}
+
+// Helpers for backward compatibility with tests (to some extent).
+// Note: IsReleased check requires access to the pool now.
+
+// NewFakeBuffer creates a standalone buffer with a dummy pool or nil pool.
+func NewFakeBuffer(size int, node int) api.Buffer {
+	return api.Buffer{
+		Data: make([]byte, size),
+		NUMA: node,
+		Pool: nil,
+	}
+}
+
+// IsReleased checks if the buffer was returned to the given pool.
+// This is a helper function to replace b.IsReleased() in tests.
+// Usage: fake.IsReleased(pool, buf)
+func IsReleased(pool *FakePool, buf api.Buffer) bool {
+	for _, b := range pool.Returned {
+		// Compare underlying data pointer?
+		if &b.Data[0] == &buf.Data[0] {
+			return true
 		}
 	}
-	return &FakeBuffer{
-		Data: make([]byte, size),
-		Node: numaPreferred,
-	}
-}
-
-func (fbp *FakeBufferPool) Put(b api.Buffer) {
-	// For testing purposes, just store it
-	fbp.Pools = append(fbp.Pools, b)
-}
-
-func (fbp *FakeBufferPool) Stats() api.BufferPoolStats {
-	return api.BufferPoolStats{}
+	return false
 }

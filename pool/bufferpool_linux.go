@@ -14,45 +14,30 @@
 package pool
 
 import (
-	"syscall"
-
 	"github.com/momentics/hioload-ws/api"
+	"github.com/momentics/hioload-ws/core/concurrency"
 )
 
 // linuxAlloc maps or allocates a buffer of exactly `sz` bytes on `numaNode`.
+// For simplicity and portability, use heap allocation instead of mmap hugepages.
 func linuxAlloc(sz, numaNode int) api.Buffer {
-	// Round to hugepage (2 MiB) boundary
-	const hugeSize = 2 << 20
-	length := ((sz + hugeSize - 1) / hugeSize) * hugeSize
-
-	data, err := syscall.Mmap(-1, 0, length,
-		syscall.PROT_READ|syscall.PROT_WRITE,
-		syscall.MAP_ANONYMOUS|syscall.MAP_PRIVATE|syscall.MAP_HUGETLB)
-	if err != nil {
-		data = make([]byte, sz)
-	} else {
-		data = data[:sz]
-	}
-	return &Buffer{data: data, numaNode: numaNode, slab: nil}
+	// Use simple heap allocation - more portable than mmap hugepages
+	data := make([]byte, sz)
+	return api.Buffer{Data: data, NUMA: numaNode}
 }
 
-// linuxRelease returns hugepage memory to the OS.
+// linuxRelease is a no-op since we use heap allocation (GC handles cleanup).
 func linuxRelease(buf api.Buffer) {
-	if b, ok := buf.(*Buffer); ok {
-		syscall.Munmap(b.data)
-	}
+	// No-op: GC handles heap-allocated buffers
 }
 
 // newSlabPool builds a slabPool with linuxAlloc/release callbacks.
 func newSlabPool(size int) *slabPool {
-	sp := &slabPool{size: size}
-	sp.newBuf = func(sz, numaNode int) api.Buffer {
-		buf := linuxAlloc(sz, numaNode)
-		if b, ok := buf.(*Buffer); ok {
-			b.slab = sp
-		}
-		return buf
+	sp := &slabPool{
+		size:  size,
+		queue: concurrency.NewLockFreeQueue[api.Buffer](defaultPoolCapacity),
 	}
+	sp.newBuf = linuxAlloc
 	sp.release = linuxRelease
 	return sp
 }

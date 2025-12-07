@@ -96,6 +96,15 @@ func (el *EventLoop) Run() {
 	backoffNs := int64(1)
 	const maxBackoffNs = int64(1_000_000)
 
+	// Create a reusable timer, initially stopped
+	timer := time.NewTimer(0)
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+
 	for {
 		// Clear batch
 		batch = batch[:0]
@@ -112,13 +121,28 @@ func (el *EventLoop) Run() {
 		}
 
 		if len(batch) == 0 {
+			// Arm the timer
+			timer.Reset(time.Duration(backoffNs) * time.Nanosecond)
+
 			select {
 			case <-el.quitCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
 			case ev := <-el.inbox:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				batch = append(batch, ev)
 				backoffNs = 1
-			case <-time.After(time.Duration(backoffNs) * time.Nanosecond):
+			case <-timer.C:
 				backoffNs *= 2
 				if backoffNs > maxBackoffNs {
 					backoffNs = maxBackoffNs

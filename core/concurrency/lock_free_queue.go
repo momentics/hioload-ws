@@ -9,61 +9,96 @@ package concurrency
 
 import "sync/atomic"
 
-// lockFreeQueue is a ring buffer for one producer, one consumer.
-type lockFreeQueue[T any] struct {
-	mask    uint64
-	entries []T
-	head    uint64
-	tail    uint64
+// LockFreeQueue is a specific MPMC bounded queue using sequence numbers to fix race conditions.
+// Based on the pattern by Dmitry Vyukov for MPMC queues.
+type LockFreeQueue[T any] struct {
+	head  uint64
+	_     [cacheLinePad]byte
+	tail  uint64
+	_     [cacheLinePad]byte
+	mask  uint64
+	cells []cell[T]
+}
+
+const cacheLinePad = 64
+
+type cell[T any] struct {
+	sequence atomic.Uint64
+	data     T
 }
 
 // NewLockFreeQueue creates a new queue with capacity rounded to power of two.
-func NewLockFreeQueue[T any](capacity int) *lockFreeQueue[T] {
+func NewLockFreeQueue[T any](capacity int) *LockFreeQueue[T] {
+	if capacity < 2 {
+		capacity = 2
+	}
+	// Round up to power of 2
 	size := 1
 	for size < capacity {
 		size <<= 1
 	}
-	return &lockFreeQueue[T]{mask: uint64(size - 1), entries: make([]T, size)}
+
+	q := &LockFreeQueue[T]{
+		mask:  uint64(size - 1),
+		cells: make([]cell[T], size),
+	}
+
+	for i := range q.cells {
+		q.cells[i].sequence.Store(uint64(i))
+	}
+	return q
 }
 
 // Enqueue adds val; returns false if full.
-func (q *lockFreeQueue[T]) Enqueue(val T) bool {
+func (q *LockFreeQueue[T]) Enqueue(val T) bool {
+	cell, _ := q.enqueueCell(val)
+	return cell != nil
+}
+
+// enqueueCell is a helper to allow reusing logic if needed,
+// though for this specific struct we just return bool.
+func (q *LockFreeQueue[T]) enqueueCell(val T) (*cell[T], bool) {
 	for {
-		head := atomic.LoadUint64(&q.head)
 		tail := atomic.LoadUint64(&q.tail)
-		if tail-head >= uint64(len(q.entries)) {
-			return false // queue is full
+		index := tail & q.mask
+		c := &q.cells[index]
+		seq := c.sequence.Load()
+		dif := int64(seq) - int64(tail)
+
+		if dif == 0 {
+			if atomic.CompareAndSwapUint64(&q.tail, tail, tail+1) {
+				c.data = val
+				c.sequence.Store(tail + 1)
+				return c, true
+			}
+		} else if dif < 0 {
+			return nil, false // full
+		} else {
+			// tail moved, retry
 		}
-		// Attempt to reserve the tail slot atomically
-		if atomic.CompareAndSwapUint64(&q.tail, tail, tail+1) {
-			q.entries[tail&q.mask] = val
-			return true
-		}
-		// If CAS failed, another producer incremented tail, so retry
 	}
 }
 
 // Dequeue removes and returns an item; ok false if empty.
-// Fixed implementation prevents race condition where multiple consumers
-// could attempt to dequeue from the same slot, causing data corruption or double consumption.
-// Uses compare-and-swap to atomically reserve the head slot before reading from it.
-func (q *lockFreeQueue[T]) Dequeue() (item T, ok bool) {
-	var head uint64
+func (q *LockFreeQueue[T]) Dequeue() (item T, ok bool) {
 	for {
-		head = atomic.LoadUint64(&q.head)
-		tail := atomic.LoadUint64(&q.tail)
-		if head >= tail {
-			return item, false // queue is empty
-		}
+		head := atomic.LoadUint64(&q.head)
+		index := head & q.mask
+		c := &q.cells[index]
+		seq := c.sequence.Load()
+		dif := int64(seq) - int64(head+1)
 
-		// Try to reserve the next slot by incrementing head
-		if atomic.CompareAndSwapUint64(&q.head, head, head+1) {
-			break // Successfully reserved our slot
+		if dif == 0 {
+			if atomic.CompareAndSwapUint64(&q.head, head, head+1) {
+				item = c.data
+				c.sequence.Store(head + q.mask + 1)
+				return item, true
+			}
+		} else if dif < 0 {
+			var zero T
+			return zero, false // empty
+		} else {
+			// head moved, retry
 		}
-		// If CAS failed, another consumer modified head, so retry
 	}
-
-	// Now read from the reserved slot (head is ours exclusively)
-	item = q.entries[head&q.mask]
-	return item, true
 }

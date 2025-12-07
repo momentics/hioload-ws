@@ -10,7 +10,7 @@ package pool
 
 import (
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/internal/concurrency"
+	"github.com/momentics/hioload-ws/core/concurrency"
 )
 
 // BufferRing[T] implements api.Ring[T] with power-of-two capacity.

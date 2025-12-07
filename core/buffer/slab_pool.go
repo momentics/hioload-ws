@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/momentics/hioload-ws/api"
+	"github.com/momentics/hioload-ws/core/concurrency"
 )
 
 // slabPool: fixed-size buffer allocation per size class/NUMA node.
@@ -16,19 +17,19 @@ type slabPool struct {
 	size      int
 	newBuf    func(size, numaNode int) api.Buffer
 	release   func(api.Buffer)
-	maxCached int64
-
-	head       atomic.Pointer[nodeBuf]
+	
+	// Queue takes the place of head/stack.
+	// We use a fixed capacity queue.
+	queue     *concurrency.LockFreeQueue[api.Buffer]
+	
 	totalAlloc atomic.Uint64
 	totalFree  atomic.Uint64
 	numaStats  atomic.Pointer[numaMap]
 }
 
-// nodeBuf: node in lock-free stack.
-type nodeBuf struct {
-	buf  api.Buffer
-	next *nodeBuf
-}
+const defaultPoolCapacity = 4096
+
+// nodeBuf removed - no longer needed.
 
 // numaMap: allocation counters by NUMA node.
 type numaMap struct {
@@ -46,46 +47,38 @@ func (m *numaMap) Get() map[int]uint64 {
 }
 
 func (sp *slabPool) Get(_ int, numaNode int) api.Buffer {
-	for {
-		top := sp.head.Load()
-		if top == nil {
-			buf := sp.newBuf(sp.size, numaNode)
-			if b, ok := buf.(*Buffer); ok {
-				b.slab = sp
-				b.class = sp.size // annotate buffer with size class
-			}
-			sp.totalAlloc.Add(1)
-			mPtr := sp.numaStats.Load()
-			if mPtr == nil {
-				newMap := newNumamap()
-				sp.numaStats.Store(newMap)
-				mPtr = newMap
-			}
-			mPtr.record(numaNode)
-			return buf
-		}
-		if sp.head.CompareAndSwap(top, top.next) {
-			return top.buf
-		}
+	// Try to dequeue from pool
+	if buf, ok := sp.queue.Dequeue(); ok {
+		return buf
 	}
+	
+	// Pool empty, allocate new
+	buf := sp.newBuf(sp.size, numaNode)
+	// Direct struct field assignment (no type assertion needed)
+	buf.Pool = sp
+	buf.Class = sp.size
+	
+	sp.totalAlloc.Add(1)
+	mPtr := sp.numaStats.Load()
+	if mPtr == nil {
+		newMap := newNumamap()
+		sp.numaStats.Store(newMap)
+		mPtr = newMap
+	}
+	mPtr.record(numaNode)
+	return buf
 }
 
 func (sp *slabPool) Put(buf api.Buffer) {
-	freeCount := sp.totalFree.Load()
-	if sp.maxCached > 0 && int64(freeCount) >= sp.maxCached {
-		if sp.release != nil {
-			sp.release(buf)
-		}
+	// Try to enqueue to pool
+	if sp.queue.Enqueue(buf) {
+		sp.totalFree.Add(1)
 		return
 	}
-	node := &nodeBuf{buf: buf}
-	for {
-		old := sp.head.Load()
-		node.next = old
-		if sp.head.CompareAndSwap(old, node) {
-			sp.totalFree.Add(1)
-			return
-		}
+	
+	// Pool full, release
+	if sp.release != nil {
+		sp.release(buf)
 	}
 }
 

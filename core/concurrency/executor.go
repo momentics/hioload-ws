@@ -22,7 +22,7 @@ type TaskFunc func()
 // Executor manages a pool of worker goroutines.
 type Executor struct {
 	globalQueue   chan TaskFunc
-	localQueues   []*lockFreeQueue[TaskFunc]
+	localQueues   []*LockFreeQueue[TaskFunc]
 	workers       []*worker
 	closeCh       chan struct{}
 	closed        atomic.Bool
@@ -44,7 +44,7 @@ func NewExecutor(numWorkers, numaNode int) *Executor {
 		resizeRequest:  make(chan int),
 		removeWorkerCh: make(chan *worker),
 	}
-	e.localQueues = make([]*lockFreeQueue[TaskFunc], numWorkers)
+	e.localQueues = make([]*LockFreeQueue[TaskFunc], numWorkers)
 	e.workers = make([]*worker, numWorkers)
 	for i := 0; i < numWorkers; i++ {
 		e.localQueues[i] = NewLockFreeQueue[TaskFunc](1024)
@@ -142,7 +142,7 @@ func (e *Executor) NumWorkers() int {
 type worker struct {
 	id         int
 	executor   *Executor
-	localQueue *lockFreeQueue[TaskFunc]
+	localQueue *LockFreeQueue[TaskFunc]
 	stopCh     chan struct{}
 	stoppedCh  chan struct{} // Used for safe pool resizing!
 }

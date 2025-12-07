@@ -55,11 +55,11 @@ func TestLowLevelThroughput(t *testing.T) {
 		frame *protocol.WSFrame
 	}
 	echoChan := make(chan echoWork, 1000)
-	
+
 	// Worker goroutine - serializes all echo sends
 	go func() {
 		for work := range echoChan {
-// fmt.Printf("DEBUG: Worker SendFrame PayloadLen=%d, len(Payload)=%d\n", work.frame.PayloadLen, len(work.frame.Payload))
+			// fmt.Printf("DEBUG: Worker SendFrame PayloadLen=%d, len(Payload)=%d\n", work.frame.PayloadLen, len(work.frame.Payload))
 			work.conn.SendFrame(work.frame)
 		}
 	}()
@@ -71,21 +71,21 @@ func TestLowLevelThroughput(t *testing.T) {
 				// fmt.Printf("DEBUG: EchoHandler PANIC: %v\n", r)
 			}
 		}()
-		
+
 		// Unwrap thunk if data is a function
 		if thunk, ok := data.(func() interface{}); ok {
 			data = thunk()
 		}
-		
+
 		// fmt.Printf("DEBUG: EchoHandler data type: %T\n", data)
-		
+
 		// Handle Open/Close events
 		switch data.(type) {
 		case api.OpenEvent, api.CloseEvent:
 			// fmt.Println("DEBUG: EchoHandler: Open/Close event, returning")
 			return nil
 		}
-		
+
 		var buf api.Buffer
 		if getter, ok := data.(interface{ GetBuffer() api.Buffer }); ok {
 			buf = getter.GetBuffer()
@@ -97,7 +97,7 @@ func TestLowLevelThroughput(t *testing.T) {
 			// fmt.Println("DEBUG: EchoHandler: No buffer found")
 		}
 
-		if buf != nil {
+		if buf.Data != nil {
 			var conn *protocol.WSConnection
 			if connData, ok := data.(interface{ WSConnection() *protocol.WSConnection }); ok {
 				conn = connData.WSConnection()
@@ -110,21 +110,21 @@ func TestLowLevelThroughput(t *testing.T) {
 				}
 			}
 
-		if conn != nil {
-			// Send work to dedicated worker goroutine via channel
+			if conn != nil {
+				// Send work to dedicated worker goroutine via channel
 				// Copy payload since buffer will be released
 				bufBytes := buf.Bytes()
-// fmt.Printf("DEBUG: Echo handler bufBytes len=%d\n", len(bufBytes))
+				// fmt.Printf("DEBUG: Echo handler bufBytes len=%d\n", len(bufBytes))
 				payloadCopy := make([]byte, len(bufBytes))
 				copy(payloadCopy, bufBytes)
-				
+
 				frame := &protocol.WSFrame{
 					IsFinal:    true,
 					Opcode:     protocol.OpcodeBinary,
 					PayloadLen: int64(len(payloadCopy)),
 					Payload:    payloadCopy,
 				}
-				
+
 				// Non-blocking send - if channel full, drop (shouldn't happen with 1000 capacity)
 				select {
 				case echoChan <- echoWork{conn: conn, frame: frame}:
@@ -159,10 +159,10 @@ func TestLowLevelThroughput(t *testing.T) {
 
 	// 2. Start Low-Level Client
 	cliCfg := client.DefaultConfig()
-	cliCfg.Addr = wsAddr 
+	cliCfg.Addr = wsAddr
 	cliCfg.IOBufferSize = 65536 // Match server
 	// cliCfg.NUMANode = 0 // Auto
-	
+
 	cli, err := client.NewClient(cliCfg)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
@@ -171,7 +171,7 @@ func TestLowLevelThroughput(t *testing.T) {
 
 	// 3. Benchmark Loop
 	sizes := []int{32} // Reduced for quick verification
-	msgCount := 20 // Reduced for completion
+	msgCount := 20     // Reduced for completion
 
 	var received uint64
 
@@ -180,13 +180,13 @@ func TestLowLevelThroughput(t *testing.T) {
 		for {
 			bufs, err := cli.Recv()
 			if err != nil {
-// fmt.Printf("DEBUG: Receiver error: %v\n", err)
+				// fmt.Printf("DEBUG: Receiver error: %v\n", err)
 				return
 			}
 			for _, b := range bufs {
 				rx := atomic.AddUint64(&received, 1)
-				if rx <= 5 || rx % 100 == 0 {
-// fmt.Printf("DEBUG: Receiver got buf len=%d, total=%d\n", len(b.Bytes()), rx)
+				if rx <= 5 || rx%100 == 0 {
+					// fmt.Printf("DEBUG: Receiver got buf len=%d, total=%d\n", len(b.Bytes()), rx)
 				}
 				b.Release()
 			}
@@ -199,7 +199,7 @@ func TestLowLevelThroughput(t *testing.T) {
 
 	for _, size := range sizes {
 		payload := make([]byte, size)
-		
+
 		initialRx := atomic.LoadUint64(&received)
 		targetRx := initialRx + uint64(msgCount)
 
@@ -209,7 +209,7 @@ func TestLowLevelThroughput(t *testing.T) {
 			cli.Send(payload)
 		}
 		// fmt.Println("DEBUG: Send loop done. Waiting for receive...")
-		
+
 		// Wait for completion
 		for atomic.LoadUint64(&received) < targetRx {
 			if time.Since(start) > 30*time.Second {
@@ -221,12 +221,14 @@ func TestLowLevelThroughput(t *testing.T) {
 		duration := time.Since(start)
 
 		rx := atomic.LoadUint64(&received) - initialRx
-		if duration.Seconds() == 0 { duration = time.Millisecond }
+		if duration.Seconds() == 0 {
+			duration = time.Millisecond
+		}
 		mbps := float64(rx*uint64(size)) / 1024 / 1024 / duration.Seconds()
 		rps := float64(rx) / duration.Seconds()
 
 		fmt.Printf("%-10d %-12d %-15.2f %-15.2f\n", size, rx, rps, mbps)
-		
+
 		time.Sleep(50 * time.Millisecond)
 	}
 	fmt.Printf("========================================================\n\n")
@@ -256,7 +258,7 @@ func TestHighLevelThroughput(t *testing.T) {
 			}
 		}
 	})
-	
+
 	go srv.ListenAndServe()
 	time.Sleep(200 * time.Millisecond)
 
@@ -272,7 +274,7 @@ func TestHighLevelThroughput(t *testing.T) {
 	msgCount := 2000
 
 	var received uint64
-	
+
 	// Receiver routine
 	go func() {
 		for {
@@ -290,7 +292,7 @@ func TestHighLevelThroughput(t *testing.T) {
 
 	for _, size := range sizes {
 		payload := make([]byte, size)
-		
+
 		initialRx := atomic.LoadUint64(&received)
 		targetRx := initialRx + uint64(msgCount)
 
@@ -317,7 +319,7 @@ func TestHighLevelThroughput(t *testing.T) {
 		rps := float64(rx) / duration.Seconds()
 
 		fmt.Printf("%-10d %-12d %-15.2f %-15.2f\n", size, rx, rps, mbps)
-		
+
 		time.Sleep(50 * time.Millisecond)
 	}
 	fmt.Printf("========================================================\n\n")

@@ -37,45 +37,6 @@ func sizeClassUpperBound(size int) int {
 	return sizeClasses[len(sizeClasses)-1] // fallback: biggest class
 }
 
-// Buffer implements api.Buffer and carries info for zero-copy management.
-type Buffer struct {
-	data     []byte
-	numaNode int
-	slab     *slabPool
-	class    int // size class used by source pool
-}
-
-// Bytes returns the full byte slice backing this Buffer.
-func (b *Buffer) Bytes() []byte { return b.data }
-func (b *Buffer) NUMANode() int { return b.numaNode }
-func (b *Buffer) Copy() []byte  { dup := make([]byte, len(b.data)); copy(dup, b.data); return dup }
-func (b *Buffer) Slice(from, to int) api.Buffer {
-	// Implement bounds checking to prevent slice out of bounds errors
-	if from < 0 || to > len(b.data) || from > to {
-		// Return a zero-length buffer if bounds are invalid to prevent panic
-		return &Buffer{
-			data:     []byte{},
-			numaNode: b.numaNode,
-			class:    b.class,
-			slab:     b.slab,
-		}
-	}
-	return &Buffer{
-		data:     b.data[from:to],
-		numaNode: b.numaNode,
-		class:    b.class,
-		slab:     b.slab,
-	}
-}
-func (b *Buffer) Release() {
-	if b.slab != nil {
-		b.slab.Put(b)
-	}
-}
-func (b *Buffer) Capacity() int {
-	return cap(b.data)
-}
-
 // BufferPoolManager manages all size-classed pools for all NUMA nodes.
 type BufferPoolManager struct {
 	nodeCnt int

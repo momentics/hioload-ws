@@ -17,9 +17,11 @@ import (
 	"unsafe"
 
 	"github.com/momentics/hioload-ws/api"
+	"github.com/momentics/hioload-ws/core/concurrency"
 	"golang.org/x/sys/windows"
 )
 
+// windowsAlloc reserves `sz` bytes on `numaNode` via VirtualAllocExNuma.
 // windowsAlloc reserves `sz` bytes on `numaNode` via VirtualAllocExNuma.
 func windowsAlloc(sz, numaNode int) api.Buffer {
 	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("VirtualAllocExNuma")
@@ -31,23 +33,25 @@ func windowsAlloc(sz, numaNode int) api.Buffer {
 		uintptr(windows.PAGE_READWRITE),
 		uintptr(uint32(numaNode)),
 	)
-	var buf *Buffer
+	var buf api.Buffer
 	if ret == 0 {
-		buf = &Buffer{data: make([]byte, sz), numaNode: numaNode, slab: nil}
+		buf = api.Buffer{Data: make([]byte, sz), NUMA: numaNode}
 	} else {
 		data := unsafe.Slice((*byte)(unsafe.Pointer(ret)), sz)
-		buf = &Buffer{data: data, numaNode: numaNode, slab: nil}
+		buf = api.Buffer{Data: data, NUMA: numaNode}
 	}
 	return buf
 }
 
 // windowsRelease frees memory via VirtualFree.
 func windowsRelease(buf api.Buffer) {
-	if b, ok := buf.(*Buffer); ok {
+	if len(buf.Data) > 0 {
+		// We need pointer to first byte of data
+		addr := &buf.Data[0]
 		proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("VirtualFree")
 		proc.Call(
-			uintptr(unsafe.Pointer(&b.data[0])),
-			uintptr(len(b.data)),
+			uintptr(unsafe.Pointer(addr)),
+			uintptr(len(buf.Data)),
 			uintptr(windows.MEM_RELEASE),
 		)
 	}
@@ -55,14 +59,11 @@ func windowsRelease(buf api.Buffer) {
 
 // newSlabPool builds a slabPool with windowsAlloc/release callbacks.
 func newSlabPool(size int) *slabPool {
-	sp := &slabPool{size: size}
-	sp.newBuf = func(sz, numaNode int) api.Buffer {
-		buf := windowsAlloc(sz, numaNode)
-		if b, ok := buf.(*Buffer); ok {
-			b.slab = sp
-		}
-		return buf
+	sp := &slabPool{
+		size:  size,
+		queue: concurrency.NewLockFreeQueue[api.Buffer](defaultPoolCapacity),
 	}
+	sp.newBuf = windowsAlloc
 	sp.release = windowsRelease
 	return sp
 }
