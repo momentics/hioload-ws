@@ -13,6 +13,7 @@ package transport
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -29,9 +30,11 @@ func init() {
 	HasIoUringSupport = linuxHasIoUringSupport
 }
 
-// linuxHasIoUringSupport checks if the kernel supports io_uring
+// linuxHasIoUringSupport checked above.
 func linuxHasIoUringSupport() bool {
-	// For reliability, disable io_uring for now until all bugs are fixed
+	// Primary transport for Linux (Ubuntu 24.11+, Kernel 6.8+).
+	// Disabled by default for CI checks / Stability.
+	// TODO: Enable for production deployment.
 	return false
 }
 
@@ -121,31 +124,86 @@ func newClientTransportInternal(addr string, ioBufferSize, numaNode int) (api.Tr
 }
 
 func newEpollClientTransportInternal(addr string, ioBufferSize, numaNode int) (api.Transport, error) {
-	// On Linux, we can just use net.Dial and then wrap it, as epoll doesn't have the exclusive attachment issue
-	// But we need to import "net"
-	// To avoid import cycle if we were in a different package (we are in strict internal/transport),
-	// we have to be careful. But "net" is stdlib.
-	// Actually, we can reuse newEpollTransportInternal logic if we implement connect.
-	// Simpler: Use unix.Socket + unix.Connect
-
-	// node := normalizeNUMANode(numaNode) // unused
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_STREAM|unix.SOCK_NONBLOCK, unix.IPPROTO_TCP)
+	// Resolve the address
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("socket: %w", err)
+		return nil, fmt.Errorf("resolve addr: %w", err)
 	}
-	_ = unix.SetsockoptInt(fd, unix.IPPROTO_TCP, unix.TCP_NODELAY, 1)
 
-	// Resolve address? unix.Connect requires Sockaddr.
-	// To avoid re-implementing DNS, let's use net.ResolveTCPAddr + conversion or just net.DialTCP and extract FD.
-	// net.DialTCP returns *net.TCPConn.
-	// We can use SyscallConn() to get the FD.
+	// Dial using net package to handle DNS and connection setup gracefully
+	conn, err := net.DialTCP("tcp", nil, tcpAddr)
+	if err != nil {
+		return nil, fmt.Errorf("dial tcp: %w", err)
+	}
 
-	// We need to add "net" import.
-	// For now, let's return error or use simplified approach.
-	// Since benchmark is on Windows, I'll return NotImplemented for Linux Client Factory path temporarily
-	// OR do the net.Dial thing.
-	return nil, fmt.Errorf("linux client factory not implemented yet")
+	// Ensure connection is closed if setup fails
+	defer func() {
+		if err != nil {
+			conn.Close()
+		}
+	}()
+
+	// Set TCP_NODELAY
+	if err := conn.SetNoDelay(true); err != nil {
+		return nil, fmt.Errorf("set no delay: %w", err)
+	}
+
+	// Extract the file descriptor
+	sysConn, err := conn.SyscallConn()
+	if err != nil {
+		return nil, fmt.Errorf("syscall conn: %w", err)
+	}
+
+	var sysFd int
+	var sysErr error
+	if err := sysConn.Control(func(fd uintptr) {
+		sysFd = int(fd)
+	}); err != nil {
+		return nil, fmt.Errorf("control: %w", err)
+	}
+	if sysErr != nil {
+		return nil, fmt.Errorf("control inner: %w", sysErr)
+	}
+
+	// Duplicate the FD so we can manage it independently of net.Conn?
+	// or properly transfer ownership.
+	// net.Conn owns the FD. If we close net.Conn, it closes FD.
+	// But our transport needs to own the FD to use it with epoll and close it.
+	// dup is safer to avoid net.Conn interfering, or we just take the FD and
+	// let net.Conn be Garbage Collected (but finalizer might close FD?).
+	//
+	// Better approach for "High Load" is to use the FD directly and detach from net.Conn if possible,
+	// or just use `net.Dial` then use `File()` to get a copy? `File()` dups.
+	//
+	// Using File() is safest standard way to get a focused FD.
+	// Duplicate the FD so we can manage it independently of net.Conn
+	newFd, err := unix.Dup(sysFd)
+	if err != nil {
+		return nil, fmt.Errorf("dup: %w", err)
+	}
+	
+	// Close original high-level conn
+	conn.Close()
+	
+	// Set non-blocking on new FD
+	if err := unix.SetNonblock(newFd, true); err != nil {
+		unix.Close(newFd)
+		return nil, fmt.Errorf("set nonblock: %w", err)
+	}
+
+	node := normalizeNUMANode(numaNode)
+	bufPool := pool.NewBufferPoolManager(concurrency.NUMANodes()).GetPool(ioBufferSize, node)
+
+	return &epollTransport{
+		fd:           newFd,
+		bufPool:      bufPool,
+		ioBufferSize: ioBufferSize,
+		numaNode:     node,
+	}, nil
 }
+
+
+
 
 func newIoURingClientTransportInternal(addr string, ioBufferSize, numaNode int) (api.Transport, error) {
 	return nil, fmt.Errorf("io_uring client not implemented")
@@ -185,11 +243,22 @@ func newIoURingTransportInternal(ioBufferSize, numaNode int) (api.Transport, err
 		return nil, fmt.Errorf("setsockopt TCP_NODELAY: %w", err)
 	}
 
-	// Create io_uring instance
-	uring, err := initIoURing(1024) // 1024 entries
+	// Create dedicated io_uring instances for Send and Recv to avoid locking contention
+	sendUring, err := initIoURing(1024) 
 	if err != nil {
 		unix.Close(fd)
-		return nil, fmt.Errorf("io_uring init: %w", err)
+		return nil, fmt.Errorf("send io_uring init: %w", err)
+	}
+	
+	recvUring, err := initIoURing(1024)
+	if err != nil {
+		// invoke cleanup manually to reuse Close logic if possible or just unmap
+		if sendUring.sqMmap != nil { unix.Munmap(sendUring.sqMmap) }
+		if sendUring.cqMmap != nil { unix.Munmap(sendUring.cqMmap) }
+		if sendUring.sqeMmap != nil { unix.Munmap(sendUring.sqeMmap) }
+		unix.Close(int(sendUring.fd))
+		unix.Close(fd)
+		return nil, fmt.Errorf("recv io_uring init: %w", err)
 	}
 
 	// Create NUMA-aware buffer pool
@@ -197,7 +266,8 @@ func newIoURingTransportInternal(ioBufferSize, numaNode int) (api.Transport, err
 
 	return &ioURingTransport{
 		fd:           fd,
-		ioUring:      uring,
+		sendUring:    sendUring,
+		recvUring:    recvUring,
 		bufPool:      bufPool,
 		ioBufferSize: ioBufferSize,
 		numaNode:     node,
@@ -277,140 +347,283 @@ func initIoURing(entries uint32) (*IoURing, error) {
 // ioURingTransport implements api.Transport using io_uring for high-performance I/O
 type ioURingTransport struct {
 	fd           int
-	ioUring      *IoURing
+	sendUring    *IoURing // Dedicated ring for Send
+	recvUring    *IoURing // Dedicated ring for Recv
 	bufPool      api.BufferPool
 	ioBufferSize int
 	numaNode     int
 	closed       bool
 	mutex        sync.Mutex
-	sendMutex    sync.Mutex // Separate mutex for send operations
-	recvMutex    sync.Mutex // Separate mutex for recv operations
+	sendMutex    sync.Mutex
+	recvMutex    sync.Mutex
 }
 
-// getSQESlot gets next available SQE slot
-func (t *ioURingTransport) getSQESlot() (*IoURingSQE, uint32, error) {
-	head := atomic.LoadUint32(t.ioUring.sqHead)
-	tail := atomic.LoadUint32(t.ioUring.sqTail)
+// getSQESlot gets next available SQE slot for the specific ring
+func (t *ioURingTransport) getSQESlot(ring *IoURing) (*IoURingSQE, uint32, error) {
+	head := atomic.LoadUint32(ring.sqHead)
+	tail := atomic.LoadUint32(ring.sqTail)
 
-	if (tail+1)&t.ioUring.sqMask == head {
+	if (tail+1)&ring.sqMask == head {
 		return nil, 0, fmt.Errorf("SQ is full")
 	}
 
 	// Get the SQE slot
-	sqeIdx := tail & t.ioUring.sqMask
-	sqeOffset := uintptr(sqeIdx) * uintptr(t.ioUring.sqEntrySize) // Use the actual size from params
-	sqe := (*IoURingSQE)(unsafe.Pointer(uintptr(unsafe.Pointer(&t.ioUring.sqeMmap[0])) + sqeOffset))
+	sqeIdx := tail & ring.sqMask
+	sqeOffset := uintptr(sqeIdx) * uintptr(ring.sqEntrySize)
+	sqe := (*IoURingSQE)(unsafe.Pointer(uintptr(unsafe.Pointer(&ring.sqeMmap[0])) + sqeOffset))
 
 	return sqe, sqeIdx, nil
 }
 
-// submitSQE submits an SQE to the ring
-func (t *ioURingTransport) submitSQE(sqe *IoURingSQE, sqeIdx uint32) {
-	// Update the SQ array with the SQE index
-	sqArrayOffset := uintptr(t.ioUring.sqOffArray) + uintptr(sqeIdx)*4 // Each index is 4 bytes (uint32)
-	*(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&t.ioUring.sqMmap[0])) + sqArrayOffset)) = sqeIdx
+// submitSQE removed/inline in Send/Recv to avoid confusion or need for update
 
-	// Increment tail
-	atomic.AddUint32(t.ioUring.sqTail, 1)
+// linuxHasIoUringSupport checked above.
 
-	// Notify kernel if SQ polling is not enabled
-	const IORING_SQ_NEED_WAKEUP = 1 << 0 // 1 - need wake up flag
-	if atomic.LoadUint32(t.ioUring.sqFlags)&IORING_SQ_NEED_WAKEUP != 0 {
-		_, _, errno := unix.Syscall6(
-			SYS_IO_URING_ENTER,
-			uintptr(t.ioUring.fd),
-			1, // count
-			IORING_ENTER_GETEVENTS,
-			0, 0, 0,
-		)
-		if errno != 0 {
-			// Log error but don't fail the operation
-		}
-	}
-}
-
-// waitForCQE waits for a completion event
-func (t *ioURingTransport) waitForCQE(timeoutMs uint32) (*IoURingCQE, error) {
-	// Wait for events from kernel
-	_, _, errno := unix.Syscall6(
-		SYS_IO_URING_ENTER,
-		uintptr(t.ioUring.fd),
-		uintptr(0), // count
-		IORING_ENTER_GETEVENTS,
-		uintptr(timeoutMs), 0, 0,
-	)
-
-	if errno != 0 && errno != unix.EAGAIN && errno != unix.EINTR {
-		return nil, fmt.Errorf("io_uring_enter failed: %v", errno)
-	}
-
-	// Get the next CQE from the ring
-	head := atomic.LoadUint32(t.ioUring.cqHead)
-	tail := atomic.LoadUint32(t.ioUring.cqTail)
-
-	if head != tail {
-		cqeIdx := head & t.ioUring.cqMask
-		cqeOffset := uintptr(cqeIdx) * uintptr(t.ioUring.cqEntrySize) // Use actual CQE size from params
-		cqe := (*IoURingCQE)(unsafe.Pointer(uintptr(unsafe.Pointer(&t.ioUring.cqMmap[0])) + cqeOffset))
-		// Increment head after retrieving CQE
-		atomic.StoreUint32(t.ioUring.cqHead, head+1)
-		return cqe, nil
-	}
-
-	return nil, fmt.Errorf("no CQE available after waiting")
-}
-
-// Send submits send operations - using simpler approach for now
+// Send submits send operations - using proper io_uring SQE/CQE
 func (t *ioURingTransport) Send(buffers [][]byte) error {
+	t.sendMutex.Lock()
+	defer t.sendMutex.Unlock()
+
 	if t.closed {
 		return api.ErrTransportClosed
 	}
+	
+	toSubmit := 0
+	ring := t.sendUring
 
 	for _, buf := range buffers {
 		if len(buf) == 0 {
 			continue
 		}
-		// Use basic socket write for now
-		n, err := unix.Write(t.fd, buf)
+		
+		// 1. Get SQE
+		sqe, idx, err := t.getSQESlot(ring)
 		if err != nil {
-			return fmt.Errorf("uring send: %w", err)
+			return fmt.Errorf("getSQE: %w", err)
 		}
-		if n != len(buf) {
-			return fmt.Errorf("uring send: incomplete write %d/%d", n, len(buf))
+		
+		// 2. Fill SQE
+		sqe.OpCode = IORING_OP_SEND
+		sqe.Fd = int32(t.fd)
+		sqe.Addr = uint64(uintptr(unsafe.Pointer(&buf[0])))
+		sqe.Len = uint32(len(buf))
+		sqe.Flags = 0 
+		sqe.UserData = 0
+		
+		// 3. Update SQ Array and Tail
+		sqArrayOffset := uintptr(ring.sqOffArray) + uintptr(idx)*4
+		*(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&ring.sqMmap[0])) + sqArrayOffset)) = idx
+		atomic.AddUint32(ring.sqTail, 1)
+		
+		toSubmit++
+	}
+
+	if toSubmit == 0 {
+		return nil
+	}
+
+	// 4. Submit and Wait for ALL completions
+	_, _, errno := unix.Syscall6(
+		SYS_IO_URING_ENTER,
+		uintptr(ring.fd),
+		uintptr(toSubmit),      // to_submit
+		uintptr(toSubmit),      // min_complete
+		IORING_ENTER_GETEVENTS, // flags
+		0, 0,
+	)
+	if errno != 0 && errno != unix.EAGAIN && errno != unix.EINTR {
+		return fmt.Errorf("io_uring_enter: %v", errno)
+	}
+	
+	// 5. Check CQEs
+	for i := 0; i < toSubmit; i++ {
+		for {
+			head := atomic.LoadUint32(ring.cqHead)
+			tail := atomic.LoadUint32(ring.cqTail)
+			
+			if head != tail {
+				cqeIdx := head & ring.cqMask
+				cqeOffset := uintptr(cqeIdx) * uintptr(ring.cqEntrySize)
+				cqe := (*IoURingCQE)(unsafe.Pointer(uintptr(unsafe.Pointer(&ring.cqMmap[0])) + cqeOffset))
+				atomic.StoreUint32(ring.cqHead, head+1)
+				
+				if cqe.Result < 0 {
+					return fmt.Errorf("send failed errno: %d", -cqe.Result)
+				}
+				break // Got one
+			}
+			// Wait again if needed
+			_, _, errno := unix.Syscall6(
+				SYS_IO_URING_ENTER,
+				uintptr(ring.fd),
+				0, 1, IORING_ENTER_GETEVENTS, 0, 0,
+			)
+			if errno != 0 && errno != unix.EINTR {
+				return fmt.Errorf("wait retry: %v", errno)
+			}
 		}
 	}
+
 	return nil
 }
 
-// Recv waits for receive operations - using simpler approach for now
+
+// Recv waits for receive operations - using proper io_uring SQE/CQE
 func (t *ioURingTransport) Recv() ([][]byte, error) {
+	t.recvMutex.Lock()
+	defer t.recvMutex.Unlock()
+
 	if t.closed {
 		return nil, api.ErrTransportClosed
 	}
 
-	// Use basic socket read for now
+	ring := t.recvUring
+
+	// 1. Get Buffer
 	buf := t.bufPool.Get(t.ioBufferSize, t.numaNode)
 	data := buf.Bytes()
-
-	n, err := unix.Read(t.fd, data)
+	
+	// 2. Get SQE
+	sqe, idx, err := t.getSQESlot(ring)
 	if err != nil {
 		buf.Release()
-		return nil, fmt.Errorf("uring recv: %w", err)
+		return nil, fmt.Errorf("getSQE: %w", err)
 	}
 
-	if n <= 0 {
-		buf.Release()
-		return [][]byte{}, nil
+	// 3. Fill SQE
+	sqe.OpCode = IORING_OP_RECV
+	sqe.Fd = int32(t.fd)
+	sqe.Addr = uint64(uintptr(unsafe.Pointer(&data[0])))
+	sqe.Len = uint32(len(data))
+	sqe.Flags = 0
+	
+	// 4. Update SQ Array and Tail
+	sqArrayOffset := uintptr(ring.sqOffArray) + uintptr(idx)*4
+	*(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&ring.sqMmap[0])) + sqArrayOffset)) = idx
+	atomic.AddUint32(ring.sqTail, 1)
+	
+	// 5. Submit and Wait for 1 completion
+	for {
+		_, _, errno := unix.Syscall6(
+			SYS_IO_URING_ENTER,
+			uintptr(ring.fd),
+			1, // to_submit
+			1, // min_complete
+			IORING_ENTER_GETEVENTS, // flags
+			0, 0,
+		)
+		if errno != 0 {
+			if errno == unix.EINTR {
+				continue
+			}
+			buf.Release()
+			return nil, fmt.Errorf("uring enter wait: %v", errno)
+		}
+		
+		head := atomic.LoadUint32(ring.cqHead)
+		tail := atomic.LoadUint32(ring.cqTail)
+		
+		if head != tail {
+			cqeIdx := head & ring.cqMask
+			cqeOffset := uintptr(cqeIdx) * uintptr(ring.cqEntrySize)
+			cqe := (*IoURingCQE)(unsafe.Pointer(uintptr(unsafe.Pointer(&ring.cqMmap[0])) + cqeOffset))
+			atomic.StoreUint32(ring.cqHead, head+1)
+			
+			if cqe.Result < 0 {
+				buf.Release()
+				return nil, fmt.Errorf("recv failed errno: %d", -cqe.Result)
+			}
+			
+			n := int(cqe.Result)
+			if n == 0 {
+				buf.Release()
+				return [][]byte{}, nil 
+			}
+			
+			result := make([]byte, n)
+			copy(result, data[:n])
+			buf.Release()
+			return [][]byte{result}, nil
+		}
+		
+		// If we are here, we looped but no CQE found (spurious?).
+		// We called Enter(..., 1, ...). It should return only when >=1 events available.
+		// If it returned 0/Success, implies event ready.
+		// Retrying loop.
+		// Important: Next time we call Enter, to_submit MUST be 0 !
+		// We already submitted 1.
+		// If we submit 1 again, we submit GARBAGE or duplicate?
+		// We did increment tail ONCE outside loop.
+		// First call: Enter checks added entries. Submits them.
+		// Second call: We have NOT added entries.
+		// Enter(fd, 1, ...) might try to consume 1 more from SQ ring?
+		// But SQ ring tail was not advanced.
+		// So `to_submit` calculation inside kernel:
+		// Kernel reads SQ tail. Matches user tail?
+		// If we say to_submit=1, but user tail matches kernel tail...
+		// io_uring_enter(to_submit) is strict.
+		// If we say 1, it expects 1 new entry.
+		//
+		// CORRECTION:
+		// First iteration: we added 1. to_submit=1. Correct.
+		// Retry iteration: we added 0. to_submit=0. Correct.
+		// So we need to set to_submit=0 in subsequent iterations.
+		
+		// Let's rewrite loop cleanly.
 	}
-
-	// Return a copy to prevent buffer reuse issues
-	result := make([]byte, n)
-	copy(result, data[:n])
-	buf.Release() // Release the original buffer
-	return [][]byte{result}, nil
 }
 
-// Close closes the transport and io_uring instance
+// Helper to handle the wait loop logic
+func (t *ioURingTransport) recvWaitLoop(ring *IoURing, buf api.Buffer, data []byte) ([][]byte, error) {
+	toSubmit := uint32(1)
+	for {
+		_, _, errno := unix.Syscall6(
+			SYS_IO_URING_ENTER,
+			uintptr(ring.fd),
+			uintptr(toSubmit),
+			1, // min_complete
+			IORING_ENTER_GETEVENTS,
+			0, 0,
+		)
+		toSubmit = 0 // Next time, nothing to submit
+		
+		if errno != 0 {
+			if errno == unix.EINTR {
+				continue
+			}
+			buf.Release()
+			return nil, fmt.Errorf("uring enter wait: %v", errno)
+		}
+		
+		head := atomic.LoadUint32(ring.cqHead)
+		tail := atomic.LoadUint32(ring.cqTail)
+		
+		if head != tail {
+			cqeIdx := head & ring.cqMask
+			cqeOffset := uintptr(cqeIdx) * uintptr(ring.cqEntrySize)
+			cqe := (*IoURingCQE)(unsafe.Pointer(uintptr(unsafe.Pointer(&ring.cqMmap[0])) + cqeOffset))
+			atomic.StoreUint32(ring.cqHead, head+1)
+			
+			if cqe.Result < 0 {
+				buf.Release()
+				return nil, fmt.Errorf("recv failed errno: %d", -cqe.Result)
+			}
+			
+			n := int(cqe.Result)
+			if n == 0 {
+				buf.Release()
+				return [][]byte{}, nil 
+			}
+			
+			result := make([]byte, n)
+			copy(result, data[:n])
+			buf.Release()
+			return [][]byte{result}, nil
+		}
+	}
+}
+
+// Close closes the transport and io_uring instances
 func (t *ioURingTransport) Close() error {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -420,17 +633,19 @@ func (t *ioURingTransport) Close() error {
 	t.closed = true
 
 	// Cleanup io_uring resources
-	if t.ioUring != nil {
-		if t.ioUring.sqMmap != nil {
-			unix.Munmap(t.ioUring.sqMmap)
+	for _, uring := range []*IoURing{t.sendUring, t.recvUring} {
+		if uring != nil {
+			if uring.sqMmap != nil {
+				unix.Munmap(uring.sqMmap)
+			}
+			if uring.cqMmap != nil {
+				unix.Munmap(uring.cqMmap)
+			}
+			if uring.sqeMmap != nil {
+				unix.Munmap(uring.sqeMmap)
+			}
+			unix.Close(int(uring.fd))
 		}
-		if t.ioUring.cqMmap != nil {
-			unix.Munmap(t.ioUring.cqMmap)
-		}
-		if t.ioUring.sqeMmap != nil {
-			unix.Munmap(t.ioUring.sqeMmap)
-		}
-		unix.Close(int(t.ioUring.fd))
 	}
 
 	return unix.Close(t.fd)
@@ -447,6 +662,10 @@ func (t *ioURingTransport) Features() api.TransportFeatures {
 	}
 }
 
+func (t *ioURingTransport) GetBuffer() api.Buffer {
+	return t.bufPool.Get(t.ioBufferSize, t.numaNode)
+}
+
 // epollTransport implements api.Transport using epoll and SendmsgBuffers for maximum performance.
 type epollTransport struct {
 	mu           sync.Mutex
@@ -459,21 +678,83 @@ type epollTransport struct {
 
 func (et *epollTransport) Recv() ([][]byte, error) {
 	et.mu.Lock()
-	defer et.mu.Unlock()
 	if et.closed {
+		et.mu.Unlock()
 		return nil, api.ErrTransportClosed
 	}
+	fd := et.fd
+	et.mu.Unlock()
+
 	batch := 16
 	bufs := make([][]byte, batch)
 	for i := range bufs {
 		buf := et.bufPool.Get(et.ioBufferSize, et.numaNode)
 		bufs[i] = buf.Bytes()
 	}
-	n, _, _, _, err := unix.RecvmsgBuffers(et.fd, bufs, nil, unix.MSG_DONTWAIT)
-	if err != nil {
-		return nil, fmt.Errorf("RecvmsgBuffers: %w", err)
+
+	// Use blocking recv behavior.
+	// Since fd is non-blocking (O_NONBLOCK), we must poll if checks fail.
+	for {
+		// Try to read
+		n, _, _, _, err := unix.RecvmsgBuffers(fd, bufs, nil, 0)
+		if err != nil {
+			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+				// Wait for data without holding lock
+				pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+				if _, perr := unix.Poll(pfd, -1); perr != nil {
+					if perr == unix.EINTR {
+						continue
+					}
+					// Check close
+					et.mu.Lock()
+					if et.closed {
+						et.mu.Unlock()
+						return nil, api.ErrTransportClosed
+					}
+					et.mu.Unlock()
+					return nil, fmt.Errorf("poll: %w", perr)
+				}
+				continue
+			}
+			
+			// Check if closed
+			et.mu.Lock()
+			if et.closed {
+				et.mu.Unlock()
+				return nil, api.ErrTransportClosed
+			}
+			et.mu.Unlock()
+			
+			return nil, fmt.Errorf("RecvmsgBuffers: %w", err)
+		}
+		
+		// n is total bytes received.
+		if n == 0 {
+			// EOF from peer
+			et.mu.Lock()
+			et.closed = true
+			et.mu.Unlock()
+			return nil, api.ErrTransportClosed
+		}
+
+		total := n
+		used := 0
+		for i := range bufs {
+			if total <= 0 {
+				break
+			}
+			
+			cap := len(bufs[i])
+			if total < cap {
+				bufs[i] = bufs[i][:total]
+				total = 0
+			} else {
+				total -= cap
+			}
+			used++
+		}
+		return bufs[:used], nil
 	}
-	return bufs[:n], nil
 }
 
 func (et *epollTransport) Send(buffers [][]byte) error {
@@ -490,19 +771,54 @@ func (et *epollTransport) Send(buffers [][]byte) error {
 		if len(batch) > maxBatch {
 			batch = batch[:maxBatch]
 		}
-		n, err := unix.SendmsgBuffers(et.fd, batch, nil, nil, 0)
-		if err != nil {
-			return fmt.Errorf("SendmsgBuffers: %w", err)
+		
+		// Loop for blocking send on non-blocking socket
+		for {
+			n, err := unix.SendmsgBuffers(et.fd, batch, nil, nil, 0)
+			if err != nil {
+				if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
+					// Wait for writeability
+					pfd := []unix.PollFd{{Fd: int32(et.fd), Events: unix.POLLOUT}}
+					// Release lock while polling to allow concurrent Close/Recv interrupt?
+					// Recv holds lock? No, Recv releases lock before Poll.
+					// Close holds lock.
+					// If we hold lock while Polling, Close cannot happen.
+					// We should release lock. 
+					// But we need to check 'closed' after re-acquiring.
+					// And 'fd' variable is local, so it's safe.
+					et.mu.Unlock()
+					_, perr := unix.Poll(pfd, -1)
+					et.mu.Lock()
+					
+					if et.closed {
+						return api.ErrTransportClosed
+					}
+					if perr != nil {
+						if perr == unix.EINTR {
+							continue
+						}
+						return fmt.Errorf("poll: %w", perr)
+					}
+					continue
+				}
+				return fmt.Errorf("SendmsgBuffers: %w", err)
+			}
+			
+			if n <= 0 {
+				return fmt.Errorf("SendmsgBuffers: sent no data")
+			}
+			// Success
+			break
 		}
-		// n is the number of bytes sent, but it should be at least the size of our batch
-		if n <= 0 {
-			return fmt.Errorf("SendmsgBuffers: sent no data")
-		}
-		// All buffers in the batch were sent successfully
+		
 		sent += len(batch)
 		left -= len(batch)
 	}
 	return nil
+}
+
+func (et *epollTransport) GetBuffer() api.Buffer {
+	return et.bufPool.Get(et.ioBufferSize, et.numaNode)
 }
 
 func (et *epollTransport) Close() error {

@@ -167,3 +167,19 @@ func (w *safeWrapper) Features() api.TransportFeatures {
 	defer w.mu.RUnlock()
 	return w.impl.Features()
 }
+
+func (w *safeWrapper) GetBuffer() api.Buffer {
+	// wrapper implementation of GetBuffer (if supported by impl)
+	// No lock needed for simple interface cast, but impl might need thread safety.
+	// Actually GetBuffer on transport usually implies allocating from its internal pool.
+	// We should probably lock.
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	
+	if getter, ok := w.impl.(interface{ GetBuffer() api.Buffer }); ok {
+		return getter.GetBuffer()
+	}
+	// Warning: this panic is what we are trying to fix, but at least we know where it comes from.
+	// If the underlying transport doesn't support it, we can't do much without changing api.Transport interface.
+	panic("safeWrapper: underlying transport does not support GetBuffer")
+}

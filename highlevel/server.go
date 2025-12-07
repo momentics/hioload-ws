@@ -491,17 +491,18 @@ func (s *Server) ListenAndServe() error {
 
 	// Create a combined handler that uses our routing
 	basicHandler := adapters.HandlerFunc(func(data any) error {
-		// This function handles incoming messages from connections
-		// In the hioload-ws architecture, data should be a Buffer from the connection
-		if buf, ok := data.(api.Buffer); ok {
+		// fmt.Printf("DEBUG: basicHandler called with type: %T\n", data)
+		var buf api.Buffer
+		
+		// Unpack buffer from data
+		if getter, ok := data.(interface{ GetBuffer() api.Buffer }); ok {
+			buf = getter.GetBuffer()
+		} else if b, ok := data.(api.Buffer); ok {
+			buf = b
+		}
+
+		if buf != nil {
 			// This is a message from a connection
-			// We need to determine which connection this is for and route appropriately
-			// However, the buffer doesn't directly give us the connection info
-			// We need to use context or other mechanisms to track this
-			
-			// For now, we'll implement a basic handler that can receive the connection info
-			// This requires access to the WSConnection through ContextFromData
-			// For events that contain the connection directly (bufEventWithConn), we can extract the path
 			var wsConn *protocol.WSConnection
 
 			// Check if the data contains a connection (in case of custom event with connection)

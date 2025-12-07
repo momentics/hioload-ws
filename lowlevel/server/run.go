@@ -36,12 +36,17 @@ type bufEventWithConn struct {
 
 // Data returns the underlying buffer payload for event dispatch.
 func (e bufEventWithConn) Data() any {
-	return e.buf
+	return e
 }
 
 // WSConnection returns the WebSocket connection associated with this event.
 func (e bufEventWithConn) WSConnection() *protocol.WSConnection {
 	return e.conn
+}
+
+// GetBuffer returns the underlying buffer.
+func (e bufEventWithConn) GetBuffer() api.Buffer {
+	return e.buf
 }
 
 // Ensure bufEventWithConn implements api.Event
