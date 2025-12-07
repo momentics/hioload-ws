@@ -44,7 +44,8 @@ func (l *Listener) Accept() (*protocol.WSConnection, error) {
 	// wrap transport
 	tr := &connTransport{conn: conn, pool: l.pool, numa: l.numaNode}
 	ws := protocol.NewWSConnection(tr, l.pool, l.chanCap)
-	ws.Start()
+	// Don't call ws.Start() to prevent recvLoop/sendLoop that conflict with server's handleConnWithTracking
+	// Server will handle receive operations directly via RecvZeroCopy in handleConnWithTracking
 	return ws, nil
 }
 

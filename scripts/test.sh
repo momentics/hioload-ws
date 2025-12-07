@@ -127,6 +127,13 @@ else
     $TEST_CMD ./internal/concurrency/... 2>/dev/null
 fi
 
+print_status "Running internal/transport tests..."
+if [ "$VERBOSE" = true ]; then
+    $TEST_CMD ./internal/transport/...
+else
+    $TEST_CMD ./internal/transport/... 2>/dev/null
+fi
+
 print_status "Running server tests..."
 if [ "$VERBOSE" = true ]; then
     $TEST_CMD ./lowlevel/server/...

@@ -1,119 +1,77 @@
-// Package hioload provides a high-level WebSocket library built on top of hioload-ws primitives.
+// File: highlevel/client.go
+// Package highlevel provides a user-friendly API for WebSocket clients and servers.
+// Author: momentics <momentics@gmail.com>
+// License: Apache-2.0
+
 package highlevel
 
 import (
-	"net/url"
+	"crypto/tls"
+	"fmt"
+	"os"
 	"time"
 
-	"github.com/momentics/hioload-ws/lowlevel/client"
-	"github.com/momentics/hioload-ws/pool"
 	"github.com/momentics/hioload-ws/internal/concurrency"
+	lowlevel_client "github.com/momentics/hioload-ws/lowlevel/client"
+	"github.com/momentics/hioload-ws/pool"
 )
 
-// Dial connects to a WebSocket server.
-func Dial(rawurl string) (*Conn, error) {
-	return DialWithOptions(rawurl)
+// Options configuration for high-level client.
+type Options struct {
+	IOBufferSize int
+	NUMANode     int
+	TLSConfig    *tls.Config
 }
 
-// DialOption configures a Dial operation.
-type DialOption func(*dialConfig)
-
-type dialConfig struct {
-	timeout          time.Duration
-	handshakeTimeout time.Duration
-	readLimit        int64
-	numaNode         int
-	batchSize        int
-	ioBufferSize     int
+// DefaultOptions returns default client configuration.
+func DefaultOptions() Options {
+	return Options{
+		IOBufferSize: 4096,
+		NUMANode:     -1,
+	}
 }
 
-// DialWithOptions connects to a WebSocket server with specific options.
-func DialWithOptions(rawurl string, opts ...DialOption) (*Conn, error) {
-	_, err := url.Parse(rawurl)
+func logToFileHelper(msg string) {
+	f, err := os.OpenFile("c:\\hioload-ws\\debug_log.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		return nil, err
+		return
+	}
+	defer f.Close()
+	ts := time.Now().Format("15:04:05.000")
+	fmt.Fprintf(f, "[%s] %s\n", ts, msg)
+}
+
+// Dial connects to a WebSocket server using default options.
+func Dial(url string) (*Conn, error) {
+	return DialWithOptions(url, DefaultOptions())
+}
+
+// DialWithOptions connects to a WebSocket server with custom options.
+func DialWithOptions(urlStr string, opts Options) (*Conn, error) {
+	logToFileHelper("DialWithOptions called")
+
+	// Construct configuration for lowlevel client
+	cfg := &lowlevel_client.Config{
+		Addr:         urlStr,
+		IOBufferSize: opts.IOBufferSize,
+		NUMANode:     opts.NUMANode,
+		ReadTimeout:  5 * time.Second, // Default timeouts
+		WriteTimeout: 5 * time.Second,
+		BatchSize:    16,
 	}
 
-	cfg := &dialConfig{
-		timeout:          45 * time.Second, // default timeout
-		handshakeTimeout: 45 * time.Second, // default handshake timeout
-		readLimit:        32 << 20,        // 32MB default read limit
-		numaNode:         -1,              // auto-detect
-		batchSize:        16,              // default batch size
-		ioBufferSize:     64 * 1024,        // 64KB default buffer size
-	}
-
-	// Apply options
-	for _, opt := range opts {
-		opt(cfg)
-	}
-
-	// Use hioload-ws client facade to establish connection
-	clientCfg := &client.Config{
-		Addr:         rawurl,
-		IOBufferSize: cfg.ioBufferSize,
-		BatchSize:    cfg.batchSize,
-		NUMANode:     cfg.numaNode,
-		ReadTimeout:  cfg.timeout,
-		WriteTimeout: cfg.timeout,
-		Heartbeat:    30 * time.Second, // default heartbeat
-	}
-
-	// Create the client using hioload-ws primitives
-	hioloadClient, err := client.NewClient(clientCfg)
+	client, err := lowlevel_client.NewClient(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("client creation failed: %w", err)
 	}
 
-	// Create buffer pool that matches the client configuration
+	wsConn := client.GetWSConnection()
+
+	// Create a buffer pool for the high-level connection wrapper
 	nodeCount := concurrency.NUMANodes()
-	bufMgr := pool.NewBufferPoolManager(nodeCount)
-	bufPool := bufMgr.GetPool(cfg.ioBufferSize, cfg.numaNode)
+	bufPool := pool.NewBufferPoolManager(nodeCount).GetPool(opts.IOBufferSize, opts.NUMANode)
 
-	// Create connection with proper linking to the underlying client
-	conn := &Conn{
-		pool:         bufPool,
-		readLimit:    cfg.readLimit,
-		readTimeout:  cfg.timeout,
-		writeTimeout: cfg.timeout,
-		autoRelease:  true,
-		client:       hioloadClient,
-	}
-
-	return conn, nil
-}
-
-// WithDialTimeout sets the timeout for the dial operation.
-func WithClientDialTimeout(d time.Duration) DialOption {
-	return func(c *dialConfig) {
-		c.timeout = d
-	}
-}
-
-// WithClientHandshakeTimeout sets the timeout for the handshake operation.
-func WithClientHandshakeTimeout(d time.Duration) DialOption {
-	return func(c *dialConfig) {
-		c.handshakeTimeout = d
-	}
-}
-
-// WithClientReadLimit sets the maximum size for incoming messages.
-func WithClientReadLimit(limit int64) DialOption {
-	return func(c *dialConfig) {
-		c.readLimit = limit
-	}
-}
-
-// WithClientNUMANode sets the preferred NUMA node for this connection.
-func WithClientNUMANode(node int) DialOption {
-	return func(c *dialConfig) {
-		c.numaNode = node
-	}
-}
-
-// WithClientBatchSize sets the batch size for this connection.
-func WithClientBatchSize(size int) DialOption {
-	return func(c *dialConfig) {
-		c.batchSize = size
-	}
+	// Use newClientConn to link the client instance (for WriteMessage delegating)
+	// highlevel/conn.go: func newClientConn(underlying *protocol.WSConnection, pool api.BufferPool, client *client.Client) *Conn
+	return newClientConn(wsConn, bufPool, client), nil
 }

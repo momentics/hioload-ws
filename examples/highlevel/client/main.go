@@ -11,11 +11,9 @@ import (
 
 func main() {
 	// Connect to the echo server
-	conn, err := highlevel.DialWithOptions("ws://localhost:8080/echo",
-		highlevel.WithClientDialTimeout(5*time.Second),
-		highlevel.WithClientReadLimit(1024*1024), // 1MB
-		highlevel.WithClientBatchSize(16),
-	)
+	// Connect to the echo server
+	opts := highlevel.DefaultOptions()
+	conn, err := highlevel.DialWithOptions("ws://localhost:8080/echo", opts)
 	if err != nil {
 		log.Fatalf("Failed to connect: %v", err)
 	}

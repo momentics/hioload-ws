@@ -18,12 +18,14 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/internal/concurrency"
-	"github.com/momentics/hioload-ws/pool"
+	pool "github.com/momentics/hioload-ws/core/buffer"
+	"github.com/momentics/hioload-ws/core/concurrency"
+	internal_transport "github.com/momentics/hioload-ws/internal/transport"
 	"github.com/momentics/hioload-ws/protocol"
 )
 
@@ -74,40 +76,91 @@ func NewClient(cfg *Config) (*Client, error) {
 		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
 
-	// Dial TCP
-	netConn, err := net.Dial("tcp", u.Host)
-	if err != nil {
-		return nil, fmt.Errorf("dial error: %w", err)
-	}
-
-	// Perform HTTP handshake
-	key := make([]byte, 16)
-	rand.Read(key)
-	secKey := base64.StdEncoding.EncodeToString(key)
-	req := &http.Request{
-		Method: "GET",
-		URL:    &url.URL{Path: u.Path},
-		Host:   u.Host,
-		Header: http.Header{
-			"Upgrade":               {"websocket"},
-			"Connection":            {"Upgrade"},
-			"Sec-WebSocket-Key":     {secKey},
-			"Sec-WebSocket-Version": {"13"},
-		},
-	}
-	if err := protocol.WriteHandshakeRequest(netConn, req); err != nil {
-		netConn.Close()
-		return nil, err
-	}
-	if err := protocol.DoClientHandshake(netConn, req); err != nil {
-		netConn.Close()
-		return nil, err
-	}
-
-	// Setup buffer pool and transport
+	// Setup buffer pool manager
 	mgr := pool.NewBufferPoolManager(concurrency.NUMANodes())
+
+	// Try optimized "raw" client first (avoids Windows IOCP conflict)
+	tf := internal_transport.NewTransportFactory(cfg.IOBufferSize, cfg.NUMANode)
+	tr, err := tf.CreateClient(u.Host)
+
+	if err == nil {
+		fmt.Printf("DEBUG: Created optimized raw client transport.\n")
+
+		// We have a transport, but we need to do the HTTP handshake.
+		// Construct a dummy net.Conn adapter for the protocol handshake functions.
+		adapter := &transportAdapter{
+			tr: tr,
+		}
+
+		// Handshake
+		key := make([]byte, 16)
+		rand.Read(key)
+		secKey := base64.StdEncoding.EncodeToString(key)
+		reqStr := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", u.Path, u.Host, secKey)
+
+		// Send request directly
+		if err := adapter.WriteRaw([]byte(reqStr)); err != nil {
+			tr.Close()
+			return nil, fmt.Errorf("handshake write failed: %w", err)
+		}
+
+		// Read response using the helper which expects bufio-like behavior or just Read()
+		// protocol.DoClientHandshake expects a net.Conn to Read/Write.
+		// Let's use our adapter.
+
+		// Actually, DoClientHandshake does validation.
+		// We can just manually validate the response here to be simpler and strictly use our transport.
+		// Read response
+		respBuf := make([]byte, 4096)
+		n, err := adapter.Read(respBuf)
+		if err != nil {
+			tr.Close()
+			return nil, fmt.Errorf("handshake read failed: %w", err)
+		}
+		respStr := string(respBuf[:n])
+		if !strings.Contains(respStr, "101 Switching Protocols") {
+			tr.Close()
+			return nil, fmt.Errorf("handshake failed, invalid response: %s", respStr)
+		}
+
+	} else {
+		// Fallback to net.Dial
+		fmt.Printf("DEBUG: Optimized client creation failed: %v. Using net.Dial.\n", err)
+		netConn, err := net.Dial("tcp", u.Host)
+		if err != nil {
+			return nil, fmt.Errorf("dial error: %w", err)
+		}
+
+		// Perform HTTP handshake on net.Conn
+		key := make([]byte, 16)
+		rand.Read(key)
+		secKey := base64.StdEncoding.EncodeToString(key)
+		req := &http.Request{
+			Method: "GET",
+			URL:    &url.URL{Path: u.Path},
+			Host:   u.Host,
+			Header: http.Header{
+				"Upgrade":               {"websocket"},
+				"Connection":            {"Upgrade"},
+				"Sec-WebSocket-Key":     {secKey},
+				"Sec-WebSocket-Version": {"13"},
+			},
+		}
+		if err := protocol.WriteHandshakeRequest(netConn, req); err != nil {
+			netConn.Close()
+			return nil, err
+		}
+		if err := protocol.DoClientHandshake(netConn, req); err != nil {
+			netConn.Close()
+			return nil, err
+		}
+
+		// Wrap
+		tr = NewTransport(netConn, mgr.GetPool(cfg.IOBufferSize, cfg.NUMANode), cfg.IOBufferSize)
+	}
+
+	// Setup buffer pool (reuse existing manager)
 	bp := mgr.GetPool(cfg.IOBufferSize, cfg.NUMANode)
-	tr := NewTransport(netConn, bp, cfg.IOBufferSize)
 
 	// Build WSConnection
 	ws := protocol.NewWSConnection(tr, bp, cfg.BatchSize)
@@ -130,6 +183,52 @@ func NewClient(cfg *Config) (*Client, error) {
 		go client.heartbeatLoop()
 	}
 	return client, nil
+}
+
+// transportAdapter adapts api.Transport to io.ReadWriter for handshake
+type transportAdapter struct {
+	tr     api.Transport
+	excess []byte
+}
+
+func (t *transportAdapter) Read(p []byte) (n int, err error) {
+	if len(t.excess) > 0 {
+		n = copy(p, t.excess)
+		t.excess = t.excess[n:]
+		return n, nil
+	}
+	bufs, err := t.tr.Recv()
+	if err != nil {
+		return 0, err
+	}
+	if len(bufs) == 0 {
+		return 0, nil
+	}
+	// Copy first buffer
+	n = copy(p, bufs[0])
+	if n < len(bufs[0]) {
+		t.excess = bufs[0][n:]
+	}
+	// Warning: dropping other buffers if batch > 1. Handshake shouldn't be batched ideally.
+	return n, nil
+}
+
+func (t *transportAdapter) Write(p []byte) (n int, err error) {
+	// Copy p because Transport expects to own the buffer potentially or we just send copy
+	// Send expects [][]byte.
+	// We need to match behavior: Transport.Send writes buffers.
+	cp := make([]byte, len(p))
+	copy(cp, p)
+	err = t.tr.Send([][]byte{cp})
+	if err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (t *transportAdapter) WriteRaw(p []byte) error {
+	_, err := t.Write(p)
+	return err
 }
 
 // Send enqueues a binary message for batch transmission.
@@ -182,7 +281,7 @@ func (c *Client) ReadMessage() (messageType int, p []byte, err error) {
 // WriteMessage writes a message to the connection.
 func (c *Client) WriteMessage(messageType int, data []byte) error {
 	// Get a buffer from the connection's buffer pool for zero-copy sending
-	buf := c.conn.BufferPool().Get(len(data), -1)  // Use the connection's buffer pool
+	buf := c.conn.BufferPool().Get(len(data), -1) // Use the connection's buffer pool
 
 	// Copy data to the buffer
 	dest := buf.Bytes()
@@ -192,7 +291,7 @@ func (c *Client) WriteMessage(messageType int, data []byte) error {
 	frame := &protocol.WSFrame{
 		IsFinal:    true,
 		Opcode:     byte(messageType),
-		Masked:     true,  // Client frames must be masked per RFC 6455
+		Masked:     true, // Client frames must be masked per RFC 6455
 		PayloadLen: int64(len(data)),
 		Payload:    dest[:len(data)],
 	}

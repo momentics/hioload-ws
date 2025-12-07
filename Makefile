@@ -97,6 +97,9 @@ test-api:
 test-concurrency:
 	$(GOTEST) -v ./internal/concurrency/...
 
+test-transport:
+	$(GOTEST) -v ./internal/transport/...
+
 test-server:
 	$(GOTEST) -v ./lowlevel/server/...
 

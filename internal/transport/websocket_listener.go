@@ -84,10 +84,24 @@ func (wsl *WebSocketListener) Accept() (*protocol.WSConnection, error) {
 		tcpConn.Close()
 		return nil, fmt.Errorf("handshake response failed: %w", err)
 	}
-	tr := &connTransport{
-		conn:       tcpConn,
-		bufferPool: wsl.bufferPool,
-		numaNode:   wsl.numaNode,
+	if err := protocol.WriteHandshakeResponse(tcpConn, hdrs); err != nil {
+		tcpConn.Close()
+		return nil, fmt.Errorf("handshake response failed: %w", err)
+	}
+
+	// Upgrade to optimized transport if possible
+	tf := NewTransportFactory(4096, wsl.numaNode)
+	tr, err := tf.CreateFromConn(tcpConn)
+	if err != nil {
+		// Fallback
+		fmt.Printf("DEBUG: Server transport upgrade failed: %v. Using default.\n", err)
+		tr = &connTransport{
+			conn:       tcpConn,
+			bufferPool: wsl.bufferPool,
+			numaNode:   wsl.numaNode,
+		}
+	} else {
+		// fmt.Printf("DEBUG: Server successfully upgraded to optimized transport.\n")
 	}
 	wsConn := protocol.NewWSConnectionWithPath(tr, wsl.bufferPool, wsl.channelSize, path)
 	return wsConn, nil
