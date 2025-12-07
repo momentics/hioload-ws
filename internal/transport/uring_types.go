@@ -57,6 +57,9 @@ const (
 	SYS_IO_URING_ENTER = 426
 	SYS_IO_URING_REGISTER = 427
 
+	// io_uring flags
+	IORING_SQ_NEED_WAKEUP = 1 << 0  // 1
+
 	IORING_ENTER_GETEVENTS = 1
 	IORING_ENTER_SQ_WAKEUP = 2
 	IORING_ENTER_SQ_WAIT = 4
@@ -71,34 +74,74 @@ type IoURingParams struct {
 	SQEntrySize  uint32
 	CQEntrySize  uint32
 	WorkerNr     uint32
-	CQOffEventfd  uint32
+	CQOffEventfd uint32
 	CQOffUserData uint32
-	CQOffFlags    uint32
-	SQOffHead     uint32
-	SQOffTail     uint32
+	CQOffFlags   uint32
+	SQOffHead    uint32
+	SQOffTail    uint32
 	SQOffRingMask uint32
 	SQOffRingEntries uint32
-	SQOffFlags    uint32
-	SQOffArray    uint32
+	SQOffFlags   uint32
+	SQOffArray   uint32
+	CQOffHead    uint32
+	CQOffTail    uint32
+	CQOffRingMask uint32
+	CQOffRingEntries uint32
+	CQOffOverflow uint32
+	CQOffCqes    uint32
+}
+
+// IoURingSQE represents a submission queue entry
+type IoURingSQE struct {
+	OpCode    uint8
+	Flags     uint8
+	IoPrio    uint16
+	Fd        int32
+	Off       uint64
+	Addr      uint64
+	Len       uint32
+	Flags2    uint32
+	UserData  uint64
+	Pad       [2]uint64
+}
+
+// IoURingCQE represents a completion queue entry
+type IoURingCQE struct {
+	UserData    uint64
+	Result      int32
+	Flags       uint32
+	ExtraData   [4]uint64 // For extended CQE data if needed
 }
 
 // IoURing represents the io_uring instance
 type IoURing struct {
-	fd        int32
-	sqHead    *uint32
-	sqTail    *uint32
-	sqMask    uint32
-	cqHead    *uint32
-	cqTail    *uint32
-	cqMask    uint32
-	sqArray   []uint32
-	cqArray   []byte  // Raw bytes containing CQE entries
-	sqSize    uint64
-	cqSize    uint64
-	sqMmap    []byte
-	cqMmap    []byte
-	sqeMmap   []byte
-	sqeHead   uint32
-	sqeTail   uint32
-	sqeMask   uint32
+	fd            int32
+	sqHead        *uint32
+	sqTail        *uint32
+	sqMask        uint32
+	sqFlags       *uint32
+	cqHead        *uint32
+	cqTail        *uint32
+	cqMask        uint32
+	cqOverflow    *uint32
+
+	sqPtrs        []uintptr // Submission queue entries pointers
+	cqPtrs        []uintptr // Completion queue entries pointers
+
+	sqMmap        []byte
+	cqMmap        []byte
+	sqeMmap       []byte   // Submission queue entries mmap
+
+	sqSize        uint64
+	cqSize        uint64
+	sqeSize       uint64
+
+	sqeHead       uint32
+	sqeTail       uint32
+	sqeMask       uint32
+
+	// Offsets for accessing ring buffer elements
+	sqOffArray    uint32
+	sqEntrySize   uint32
+	cqEntrySize   uint32
 }

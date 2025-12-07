@@ -135,5 +135,11 @@ func (wt *windowsTransport) Close() error {
 }
 
 func (wt *windowsTransport) Features() api.TransportFeatures {
-	return DetectTransportFeatures()
+	return api.TransportFeatures{
+		ZeroCopy:  true,
+		Batch:     true,
+		NUMAAware: true,
+		TLS:       false,
+		OS:        []string{"windows"},
+	}
 }
