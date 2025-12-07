@@ -22,3 +22,17 @@ func DetectTransportFeatures() api.TransportFeatures {
 		OS:        []string{runtime.GOOS},
 	}
 }
+
+// RuntimeTransportSelector returns the best available transport for the current platform
+func RuntimeTransportSelector() string {
+	if runtime.GOOS == "linux" && HasIoUringSupport() {
+		return "io_uring"
+	}
+	return "epoll"
+}
+
+// HasIoUringSupport checks if the kernel supports io_uring (stub for non-Linux)
+// The actual implementation is in Linux-specific file
+var HasIoUringSupport = func() bool {
+	return false
+}

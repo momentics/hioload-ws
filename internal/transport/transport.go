@@ -12,6 +12,7 @@ package transport
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/momentics/hioload-ws/api"
@@ -32,19 +33,46 @@ func NewTransportFactory(ioBufferSize, numaNode int) *TransportFactory {
 	}
 }
 
+// detectedTransportType stores the runtime-determined transport type
+var detectedTransportType string
+var transportTypeOnce sync.Once
+
+// detectRuntimeTransportType performs runtime detection of the best available transport
+func detectRuntimeTransportType() string {
+	transportTypeOnce.Do(func() {
+		if runtime.GOOS == "linux" && HasIoUringSupport() {
+			detectedTransportType = "io_uring"
+		} else {
+			detectedTransportType = "default" // epoll for linux without io_uring, or other platforms
+		}
+	})
+	return detectedTransportType
+}
+
 // Create builds a transport using the correct platform implementation and NUMA node.
 func (f *TransportFactory) Create() (api.Transport, error) {
-	impl, err := newTransportInternal(f.IOBufferSize, f.NUMANode)
+	transportType := detectRuntimeTransportType()
+
+	var impl api.Transport
+	var err error
+
+	switch transportType {
+	case "io_uring":
+		impl, err = newIoURingTransportInternal(f.IOBufferSize, f.NUMANode)
+		if err != nil {
+			// If io_uring fails, fall back to epoll
+			impl, err = newEpollTransportInternal(f.IOBufferSize, f.NUMANode)
+		}
+	default:
+		impl, err = newTransportInternal(f.IOBufferSize, f.NUMANode)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("transport init: %w", err)
 	}
 	return &safeWrapper{impl: impl}, nil
 }
 
-// newTransportInternal is a platform-specific factory function for creating transports.
-// On Linux with io_uring support, it creates io_uring transport.
-// On Linux without io_uring support, it falls back to epoll-based transport.
-// This function is implemented in platform-specific files.
 
 // safeWrapper synchronizes all external api.Transport calls, making transport thread-safe.
 // This does not serialize I/O inside the transport but only API visibility.
