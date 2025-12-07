@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"unsafe"
 
 	"github.com/momentics/hioload-ws/api"
@@ -31,26 +30,8 @@ func init() {
 
 // linuxHasIoUringSupport checks if the kernel supports io_uring
 func linuxHasIoUringSupport() bool {
-	// Try to create a minimal io_uring instance to check support
-	var params IoURingParams
-	params.SQEntries = 2 // minimal size
-	params.CQEntries = 2
-
-	fd, _, errno := unix.Syscall6(
-		SYS_IO_URING_SETUP,
-		uintptr(2), // entries
-		uintptr(unsafe.Pointer(&params)),
-		0, 0, 0, 0,
-	)
-
-	if errno != 0 {
-		// io_uring not available or not supported
-		return false
-	}
-
-	// Successfully created, close it
-	unix.Close(int(fd))
-	return true
+	// For reliability, disable io_uring for now until all bugs are fixed
+	return false
 }
 
 
@@ -156,7 +137,7 @@ func initIoURing(entries uint32) (*IoURing, error) {
 	// Calculate proper mmap sizes based on parameters returned by the kernel
 	sqMmapSize := int(params.SQOffArray) + int(params.SQEntries)*8 // 8 bytes per sq entry index (uint64)
 	cqMmapSize := int(params.CQOffCqes) + int(params.CQEntries)*int(params.CQEntrySize)
-	sqeMmapSize := int(entries) * int(params.SQEntrySize)
+	sqeMmapSize := int(params.SQEntries) * int(params.SQEntrySize)
 
 	// Map rings
 	sqMmap, err := unix.Mmap(int(fd), 0, sqMmapSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
@@ -172,7 +153,7 @@ func initIoURing(entries uint32) (*IoURing, error) {
 		return nil, fmt.Errorf("mmap CQ ring: %w", err)
 	}
 
-	sqeMmap, err := unix.Mmap(int(fd), int64(params.SQEntrySize), sqeMmapSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	sqeMmap, err := unix.Mmap(int(fd), 0, sqeMmapSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
 		unix.Munmap(sqMmap)
 		unix.Munmap(cqMmap)
@@ -185,11 +166,11 @@ func initIoURing(entries uint32) (*IoURing, error) {
 		fd:         int32(fd),
 		sqHead:     (*uint32)(unsafe.Pointer(&sqMmap[params.SQOffHead])),
 		sqTail:     (*uint32)(unsafe.Pointer(&sqMmap[params.SQOffTail])),
-		sqMask:     *(*uint32)(unsafe.Pointer(&sqMmap[params.SQOffRingMask])),
+		sqMask:     params.SQOffRingMask,  // Use kernel-provided mask, don't overwrite
 		sqFlags:    (*uint32)(unsafe.Pointer(&sqMmap[params.SQOffFlags])),
 		cqHead:     (*uint32)(unsafe.Pointer(&cqMmap[params.CQOffHead])),
 		cqTail:     (*uint32)(unsafe.Pointer(&cqMmap[params.CQOffTail])),
-		cqMask:     *(*uint32)(unsafe.Pointer(&cqMmap[params.CQOffRingMask])),
+		cqMask:     params.CQOffRingMask,  // Use kernel-provided mask, don't overwrite
 		cqOverflow: (*uint32)(unsafe.Pointer(&cqMmap[params.CQOffOverflow])),
 		sqMmap:     sqMmap,
 		cqMmap:     cqMmap,
@@ -201,10 +182,6 @@ func initIoURing(entries uint32) (*IoURing, error) {
 		sqEntrySize: params.SQEntrySize,
 		cqEntrySize: params.CQEntrySize,
 	}
-
-	// Initialize masks
-	uring.sqMask = params.SQEntries - 1
-	uring.cqMask = params.CQEntries - 1
 
 	return uring, nil
 }
@@ -227,7 +204,7 @@ func (t *ioURingTransport) getSQESlot() (*IoURingSQE, uint32, error) {
 	head := atomic.LoadUint32(t.ioUring.sqHead)
 	tail := atomic.LoadUint32(t.ioUring.sqTail)
 
-	if (tail + 1) % (t.ioUring.sqMask + 1) == head {
+	if (tail + 1) & t.ioUring.sqMask == head {
 		return nil, 0, fmt.Errorf("SQ is full")
 	}
 
@@ -242,16 +219,15 @@ func (t *ioURingTransport) getSQESlot() (*IoURingSQE, uint32, error) {
 // submitSQE submits an SQE to the ring
 func (t *ioURingTransport) submitSQE(sqe *IoURingSQE, sqeIdx uint32) {
 	// Update the SQ array with the SQE index
-	sqArrayOffset := uintptr(t.ioUring.sqOffArray) + uintptr(sqeIdx)*8 // Each index is 8 bytes (uint64)
+	sqArrayOffset := uintptr(t.ioUring.sqOffArray) + uintptr(sqeIdx)*4 // Each index is 4 bytes (uint32)
 	*(*uint32)(unsafe.Pointer(uintptr(unsafe.Pointer(&t.ioUring.sqMmap[0])) + sqArrayOffset)) = sqeIdx
 
 	// Increment tail
-	newTail := (atomic.LoadUint32(t.ioUring.sqTail) + 1) & t.ioUring.sqMask
-	atomic.StoreUint32(t.ioUring.sqTail, newTail)
+	atomic.AddUint32(t.ioUring.sqTail, 1)
 
 	// Notify kernel if SQ polling is not enabled
 	const IORING_SQ_NEED_WAKEUP = 1 << 0  // 1 - need wake up flag
-	if (*t.ioUring.sqFlags & IORING_SQ_NEED_WAKEUP) != 0 {
+	if atomic.LoadUint32(t.ioUring.sqFlags) & IORING_SQ_NEED_WAKEUP != 0 {
 		_, _, errno := unix.Syscall6(
 			SYS_IO_URING_ENTER,
 			uintptr(t.ioUring.fd),
@@ -267,14 +243,11 @@ func (t *ioURingTransport) submitSQE(sqe *IoURingSQE, sqeIdx uint32) {
 
 // waitForCQE waits for a completion event
 func (t *ioURingTransport) waitForCQE(timeoutMs uint32) (*IoURingCQE, error) {
-	head := atomic.LoadUint32(t.ioUring.cqHead)
-	tail := atomic.LoadUint32(t.ioUring.cqTail)
-
-	// Otherwise, wait for events from kernel
+	// Wait for events from kernel
 	_, _, errno := unix.Syscall6(
 		SYS_IO_URING_ENTER,
 		uintptr(t.ioUring.fd),
-		uintptr(1), // count
+		uintptr(0), // count
 		IORING_ENTER_GETEVENTS,
 		uintptr(timeoutMs), 0, 0,
 	)
@@ -283,161 +256,70 @@ func (t *ioURingTransport) waitForCQE(timeoutMs uint32) (*IoURingCQE, error) {
 		return nil, fmt.Errorf("io_uring_enter failed: %v", errno)
 	}
 
-	// Try again to get CQE after kernel notification
-	head = atomic.LoadUint32(t.ioUring.cqHead)
-	tail = atomic.LoadUint32(t.ioUring.cqTail)
+	// Get the next CQE from the ring
+	head := atomic.LoadUint32(t.ioUring.cqHead)
+	tail := atomic.LoadUint32(t.ioUring.cqTail)
 
 	if head != tail {
 		cqeIdx := head & t.ioUring.cqMask
 		cqeOffset := uintptr(cqeIdx) * uintptr(t.ioUring.cqEntrySize) // Use actual CQE size from params
 		cqe := (*IoURingCQE)(unsafe.Pointer(uintptr(unsafe.Pointer(&t.ioUring.cqMmap[0])) + cqeOffset))
 		// Increment head after retrieving CQE
-		atomic.StoreUint32(t.ioUring.cqHead, (head+1)&t.ioUring.cqMask)
+		atomic.StoreUint32(t.ioUring.cqHead, head+1)
 		return cqe, nil
 	}
 
 	return nil, fmt.Errorf("no CQE available after waiting")
 }
 
-// Send submits send operations to io_uring
+// Send submits send operations - using simpler approach for now
 func (t *ioURingTransport) Send(buffers [][]byte) error {
-	t.sendMutex.Lock()
-	defer t.sendMutex.Unlock()
 	if t.closed {
 		return api.ErrTransportClosed
 	}
 
-	if len(buffers) == 0 {
-		return nil
-	}
-
-	// Submit each buffer as a separate send operation
 	for _, buf := range buffers {
-		sqe, sqeIdx, err := t.getSQESlot()
-		if err != nil {
-			// Fallback to regular write if SQ is full
-			n, writeErr := syscall.Write(t.fd, buf)
-			if writeErr != nil {
-				return fmt.Errorf("io_uring SQ full and write failed: %w", writeErr)
-			}
-			if n != len(buf) {
-				return fmt.Errorf("incomplete write: %d of %d bytes", n, len(buf))
-			}
+		if len(buf) == 0 {
 			continue
 		}
-
-		// Fill in the SQE for send operation
-		sqe.OpCode = IORING_OP_SEND
-		sqe.Flags = 0
-		sqe.IoPrio = 0
-		sqe.Fd = int32(t.fd)
-		sqe.Off = 0
-		sqe.Addr = uint64(uintptr(unsafe.Pointer(&buf[0])))
-		sqe.Len = uint32(len(buf))
-		sqe.Flags2 = 0
-		sqe.UserData = uint64(sqeIdx) // Use index as user data for tracking
-
-		// Submit the SQE
-		t.submitSQE(sqe, sqeIdx)
-	}
-
-	// Wait for all send operations to complete
-	var results []error
-	for i := 0; i < len(buffers); i++ {
-		cqe, err := t.waitForCQE(1000) // 1 second timeout
+		// Use basic socket write for now
+		n, err := unix.Write(t.fd, buf)
 		if err != nil {
-			results = append(results, err)
-			continue
+			return fmt.Errorf("uring send: %w", err)
 		}
-
-		if cqe.Result < 0 {
-			// Negative result indicates an error
-			errno := -int(cqe.Result)
-			results = append(results, fmt.Errorf("send operation failed with errno %d", errno))
+		if n != len(buf) {
+			return fmt.Errorf("uring send: incomplete write %d/%d", n, len(buf))
 		}
 	}
-
-	if len(results) > 0 {
-		return fmt.Errorf("send error(s): %v", results)
-	}
-
 	return nil
 }
 
-// Recv waits for receive operations from io_uring
+// Recv waits for receive operations - using simpler approach for now
 func (t *ioURingTransport) Recv() ([][]byte, error) {
-	t.recvMutex.Lock()
-	defer t.recvMutex.Unlock()
 	if t.closed {
 		return nil, api.ErrTransportClosed
 	}
 
-	// Prepare receive buffers as a batch
-	batch := 16
-	bufs := make([][]byte, batch)
+	// Use basic socket read for now
+	buf := t.bufPool.Get(t.ioBufferSize, t.numaNode)
+	data := buf.Bytes()
 
-	// First, submit all receive operations
-	for i := 0; i < batch; i++ {
-		buf := t.bufPool.Get(t.ioBufferSize, t.numaNode)
-		bufs[i] = buf.Bytes()
-
-		sqe, sqeIdx, err := t.getSQESlot()
-		if err != nil {
-			// If SQ is full, use regular read as fallback
-			n, readErr := syscall.Read(t.fd, bufs[i])
-			if readErr != nil {
-				return nil, fmt.Errorf("io_uring SQ full and read failed: %w", readErr)
-			}
-			if n > 0 {
-				bufs[i] = bufs[i][:n]
-			} else {
-				bufs[i] = bufs[i][:0]
-			}
-			continue
-		}
-
-		// Fill in the SQE for recv operation
-		sqe.OpCode = IORING_OP_RECV
-		sqe.Flags = 0
-		sqe.IoPrio = 0
-		sqe.Fd = int32(t.fd)
-		sqe.Off = 0
-		sqe.Addr = uint64(uintptr(unsafe.Pointer(&bufs[i][0])))
-		sqe.Len = uint32(len(bufs[i]))
-		sqe.Flags2 = 0
-		sqe.UserData = uint64(sqeIdx) | (uint64(i) << 32) // Use index + batch position as user data
-
-		// Submit the SQE
-		t.submitSQE(sqe, sqeIdx)
+	n, err := unix.Read(t.fd, data)
+	if err != nil {
+		buf.Release()
+		return nil, fmt.Errorf("uring recv: %w", err)
 	}
 
-	// Wait for receive completions
-	receivedBuffs := make([][]byte, 0, batch)
-	for i := 0; i < batch; i++ {
-		cqe, err := t.waitForCQE(1000) // 1 second timeout
-		if err != nil {
-			continue // Continue with other buffers if timeout occurs
-		}
-
-		if cqe.Result > 0 {
-			// Extract buffer index from user data
-			bufIdx := (cqe.UserData >> 32) & 0xFFFFFFFF
-			bytesReceived := int(cqe.Result)
-
-			if bufIdx < uint64(len(bufs)) && bytesReceived > 0 {
-				bufs[bufIdx] = bufs[bufIdx][:bytesReceived]
-				receivedBuffs = append(receivedBuffs, bufs[bufIdx])
-			}
-		} else if cqe.Result == 0 {
-			// Connection closed - mark as empty
-		} else if cqe.Result < 0 {
-			// Error occurred - negative result means error code
-			_ = -int(cqe.Result)  // Error code, not used but acknowledge the variable
-			// Log error but continue processing other buffers
-		}
+	if n <= 0 {
+		buf.Release()
+		return [][]byte{}, nil
 	}
 
-	return receivedBuffs, nil
+	// Return a copy to prevent buffer reuse issues
+	result := make([]byte, n)
+	copy(result, data[:n])
+	buf.Release()  // Release the original buffer
+	return [][]byte{result}, nil
 }
 
 // Close closes the transport and io_uring instance

@@ -1,7 +1,3 @@
-// Package fake provides mock implementations for testing hioload-ws components.
-// Author: momentics <momentics@gmail.com>
-// License: Apache-2.0
-
 package fake
 
 import (
@@ -10,90 +6,93 @@ import (
 
 // FakeBuffer implements api.Buffer for testing.
 type FakeBuffer struct {
-	data     []byte
-	numaNode int
-	released bool
+	Data     []byte
+	Node     int
+	Released bool
 }
 
-// NewFakeBuffer creates a new fake buffer with given data.
-func NewFakeBuffer(data []byte, numaNode int) *FakeBuffer {
-	if data == nil {
-		data = make([]byte, 0)
-	}
+// NewFakeBuffer creates a new fake buffer.
+func NewFakeBuffer(size int, node int) *FakeBuffer {
 	return &FakeBuffer{
-		data:     data,
-		numaNode: numaNode,
-		released: false,
+		Data:     make([]byte, size),
+		Node:     node,
+		Released: false,
 	}
 }
 
 func (fb *FakeBuffer) Bytes() []byte {
-	return fb.data
+	return fb.Data
 }
 
 func (fb *FakeBuffer) Slice(from, to int) api.Buffer {
-	// Bounds checking
-	if from < 0 {
-		from = 0
-	}
-	if to > len(fb.data) {
-		to = len(fb.data)
-	}
-	if from > to {
-		from, to = to, from
+	if from < 0 || to > len(fb.Data) || from > to {
+		return nil
 	}
 	return &FakeBuffer{
-		data:     fb.data[from:to],
-		numaNode: fb.numaNode,
+		Data:     fb.Data[from:to],
+		Node:     fb.Node,
+		Released: fb.Released,
 	}
 }
 
 func (fb *FakeBuffer) Release() {
-	fb.released = true
+	fb.Released = true
 }
 
 func (fb *FakeBuffer) Copy() []byte {
-	result := make([]byte, len(fb.data))
-	copy(result, fb.data)
-	return result
+	cp := make([]byte, len(fb.Data))
+	copy(cp, fb.Data)
+	return cp
 }
 
 func (fb *FakeBuffer) NUMANode() int {
-	return fb.numaNode
+	return fb.Node
 }
 
 func (fb *FakeBuffer) Capacity() int {
-	return cap(fb.data)
+	return len(fb.Data)
 }
 
-// IsReleased returns whether the buffer has been released.
 func (fb *FakeBuffer) IsReleased() bool {
-	return fb.released
+	return fb.Released
 }
 
 // FakeBufferPool implements api.BufferPool for testing.
 type FakeBufferPool struct {
-	GetFunc func(size int, numaPreferred int) api.Buffer
-	PutFunc func(b api.Buffer)
-	StatsFunc func() api.BufferPoolStats
+	Size   int
+	Pools  []api.Buffer
+	Buffer *FakeBuffer
 }
 
-func (fp *FakeBufferPool) Get(size int, numaPreferred int) api.Buffer {
-	if fp.GetFunc != nil {
-		return fp.GetFunc(size, numaPreferred)
-	}
-	return NewFakeBuffer(make([]byte, size), numaPreferred)
-}
-
-func (fp *FakeBufferPool) Put(b api.Buffer) {
-	if fp.PutFunc != nil {
-		fp.PutFunc(b)
+// NewFakeBufferPool creates a new fake buffer pool.
+func NewFakeBufferPool(size int) *FakeBufferPool {
+	return &FakeBufferPool{
+		Size: size,
+		Buffer: &FakeBuffer{
+			Data: make([]byte, size),
+			Node: 0,
+		},
 	}
 }
 
-func (fp *FakeBufferPool) Stats() api.BufferPoolStats {
-	if fp.StatsFunc != nil {
-		return fp.StatsFunc()
+func (fbp *FakeBufferPool) Get(size int, numaPreferred int) api.Buffer {
+	if size <= fbp.Size {
+		return &FakeBuffer{
+			Data: make([]byte, size),
+			Node: numaPreferred,
+		}
 	}
+	return &FakeBuffer{
+		Data: make([]byte, size),
+		Node: numaPreferred,
+	}
+}
+
+func (fbp *FakeBufferPool) Put(b api.Buffer) {
+	// For testing purposes, just store it
+	fbp.Pools = append(fbp.Pools, b)
+}
+
+func (fbp *FakeBufferPool) Stats() api.BufferPoolStats {
 	return api.BufferPoolStats{}
 }

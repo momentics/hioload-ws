@@ -1,113 +1,54 @@
-// Package fake provides mock implementations for testing hioload-ws components.
-// Author: momentics <momentics@gmail.com>
-// License: Apache-2.0
-
 package fake
 
 import (
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/internal/concurrency"
 )
 
-// FakePoller implements api.Poller for testing.
+// FakePoller implements api.Poller interface for testing
 type FakePoller struct {
-	PollFunc      func(maxEvents int) (handled int, err error)
-	RegisterFunc  func(h api.Handler) error
-	UnregisterFunc func(h api.Handler) error
-	StopFunc      func()
-	PushFunc      func(ev concurrency.Event) bool
-	PollCalls     []int // Track poll calls with their maxEvents parameter
-	RegisterCalls []api.Handler
-	StopCalled    bool
-	PushCalled    int
+	RegisterCalls   []api.Handler
+	RegisteredCount int
+	PushCalls       []api.Event
+	PushedCount     int
+	PollCount       int
 }
 
-// NewFakePoller creates a new fake poller.
 func NewFakePoller() *FakePoller {
 	return &FakePoller{
-		PollCalls:     make([]int, 0),
 		RegisterCalls: make([]api.Handler, 0),
+		PushCalls:     make([]api.Event, 0),
 	}
-}
-
-func (fp *FakePoller) Poll(maxEvents int) (handled int, err error) {
-	fp.PollCalls = append(fp.PollCalls, maxEvents)
-	if fp.PollFunc != nil {
-		return fp.PollFunc(maxEvents)
-	}
-	return 0, nil
 }
 
 func (fp *FakePoller) Register(h api.Handler) error {
 	fp.RegisterCalls = append(fp.RegisterCalls, h)
-	if fp.RegisterFunc != nil {
-		return fp.RegisterFunc(h)
-	}
+	fp.RegisteredCount++
 	return nil
 }
 
+func (fp *FakePoller) Poll(maxEvents int) (int, error) {
+	fp.PollCount++
+	return 0, nil // Return 0 events for now
+}
+
 func (fp *FakePoller) Unregister(h api.Handler) error {
-	if fp.UnregisterFunc != nil {
-		return fp.UnregisterFunc(h)
+	// Remove from registered calls
+	newCalls := make([]api.Handler, 0)
+	for _, call := range fp.RegisterCalls {
+		if call != h {
+			newCalls = append(newCalls, call)
+		}
 	}
+	fp.RegisterCalls = newCalls
 	return nil
 }
 
 func (fp *FakePoller) Stop() {
-	fp.StopCalled = true
-	if fp.StopFunc != nil {
-		fp.StopFunc()
-	}
+	// Nothing to do in fake implementation
 }
 
-func (fp *FakePoller) Push(ev concurrency.Event) bool {
-	fp.PushCalled++
-	if fp.PushFunc != nil {
-		return fp.PushFunc(ev)
-	}
+func (fp *FakePoller) Push(ev api.Event) bool {
+	fp.PushCalls = append(fp.PushCalls, ev)
+	fp.PushedCount++
 	return true
-}
-
-// Reset resets the call tracking.
-func (fp *FakePoller) Reset() {
-	fp.PollCalls = fp.PollCalls[:0]
-	fp.RegisterCalls = fp.RegisterCalls[:0]
-	fp.StopCalled = false
-	fp.PushCalled = 0
-}
-
-// FakeExecutor implements api.Executor for testing.
-type FakeExecutor struct {
-	SubmitFunc   func(task func()) error
-	StopFunc     func()
-	SubmitCalls  []func()
-	StopCalled   bool
-}
-
-// NewFakeExecutor creates a new fake executor.
-func NewFakeExecutor() *FakeExecutor {
-	return &FakeExecutor{
-		SubmitCalls: make([]func(), 0),
-	}
-}
-
-func (fe *FakeExecutor) Submit(task func()) error {
-	fe.SubmitCalls = append(fe.SubmitCalls, task)
-	if fe.SubmitFunc != nil {
-		return fe.SubmitFunc(task)
-	}
-	return nil
-}
-
-func (fe *FakeExecutor) Stop() {
-	fe.StopCalled = true
-	if fe.StopFunc != nil {
-		fe.StopFunc()
-	}
-}
-
-// Reset resets the call tracking.
-func (fe *FakeExecutor) Reset() {
-	fe.SubmitCalls = fe.SubmitCalls[:0]
-	fe.StopCalled = false
 }

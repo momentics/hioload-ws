@@ -131,7 +131,7 @@ func WriteHandshakeRequest(w io.Writer, req *http.Request) error {
 }
 
 // DoClientHandshake reads and validates the HTTP/1.1 101 Switching Protocols response
-// from r, using the original req for correct parsing context. Discards remaining buffer.
+// from r, using the original req for correct parsing context.
 func DoClientHandshake(r io.Reader, req *http.Request) error {
 	br := bufio.NewReader(r)
 	resp, err := http.ReadResponse(br, req)
@@ -141,8 +141,8 @@ func DoClientHandshake(r io.Reader, req *http.Request) error {
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		return fmt.Errorf("handshake failed: status %d", resp.StatusCode)
 	}
-	// Discard any buffered data remaining after headers.
-	io.Copy(io.Discard, br)
+	// The handshake is complete. We don't discard remaining data as WebSocket frames
+	// will be read from the same connection after handshake.
 	return nil
 }
 

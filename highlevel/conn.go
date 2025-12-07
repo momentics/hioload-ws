@@ -131,28 +131,38 @@ func (c *Conn) readMessage() (messageType int, p []byte, err error) {
 	// Use zero-copy receive method with timeout
 	var buffers []api.Buffer
 
+	// Get the underlying connection properly (for clients, this comes from the client instance)
+	wsConn := c.GetUnderlyingWSConnection()
+	if wsConn == nil {
+		return 0, nil, errors.New("no underlying connection available")
+	}
+
 	if c.readTimeout > 0 {
-		// Implement timeout logic
-		done := make(chan struct{})
-		var recvErr error
-		var recvBuffers []api.Buffer
+		// Use timeout channel for synchronization without blocking
+		done := make(chan struct {
+			buffers []api.Buffer
+			err     error
+		}, 1)
 
 		go func() {
-			defer close(done)
-			recvBuffers, recvErr = c.underlying.RecvZeroCopy()
+			buffs, recvErr := wsConn.RecvZeroCopy()
+			done <- struct {
+				buffers []api.Buffer
+				err     error
+			}{buffs, recvErr}
 		}()
 
 		select {
+		case result := <-done:
+			if result.err != nil {
+				return 0, nil, result.err
+			}
+			buffers = result.buffers
 		case <-time.After(c.readTimeout):
 			return 0, nil, errors.New("read timeout")
-		case <-done:
-			if recvErr != nil {
-				return 0, nil, recvErr
-			}
-			buffers = recvBuffers
 		}
 	} else {
-		buffers, err = c.underlying.RecvZeroCopy()
+		buffers, err = wsConn.RecvZeroCopy()
 		if err != nil {
 			return 0, nil, err
 		}
@@ -174,18 +184,17 @@ func (c *Conn) readMessage() (messageType int, p []byte, err error) {
 		return 0, nil, errors.New("message exceeds read limit")
 	}
 
-	// Create a copy of the data to return
-	// For true zero-copy semantics, we could return a reference to the buffer
-	// and manage its lifecycle, but this is simpler for the high-level API
+	// Preserve zero-copy semantics by returning a copy to maintain high-level API simplicity
+	// while ensuring the original buffer can be released if autoRelease is enabled
 	result := make([]byte, len(data))
 	copy(result, data)
 
-	// Release the buffer (important for zero-copy semantics)
+	// Release the buffer (critical for preventing memory leaks in zero-copy system)
 	if c.autoRelease {
 		buf.Release()
 	}
 
-	// Return binary message type for now - in real implementation we'd extract from frame
+	// Return binary message type for now - in real implementation we'd get this from frame
 	return int(BinaryMessage), result, nil
 }
 
@@ -266,16 +275,19 @@ func (c *Conn) Close() error {
 		c.mutex.Lock()
 		c.closed = true
 		c.mutex.Unlock()
-		
+
 		// Close the underlying connection
-		err = c.underlying.Close()
-		
+		wsConn := c.GetUnderlyingWSConnection()
+		if wsConn != nil {
+			err = wsConn.Close()
+		}
+
 		// Call close callback if set
 		if c.onClose != nil {
 			c.onClose()
 		}
 	})
-	
+
 	return err
 }
 

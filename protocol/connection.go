@@ -8,7 +8,6 @@
 package protocol
 
 import (
-	"errors"
 	"sync"
 	"sync/atomic"
 
@@ -30,6 +29,9 @@ type WSConnection struct {
 	done   chan struct{}
 	closed int32
 
+	// Internal queue for frames for RecvZeroCopy when recvLoop is running
+	recvQueue chan api.Buffer
+
 	bytesReceived  int64
 	bytesSent      int64
 	framesReceived int64
@@ -44,6 +46,7 @@ func NewWSConnection(tr api.Transport, pool api.BufferPool, channelSize int) *WS
 		inbox:     make(chan *WSFrame, channelSize),
 		outbox:    make(chan *WSFrame, channelSize),
 		done:      make(chan struct{}),
+		recvQueue: make(chan api.Buffer, 64), // Queue for RecvZeroCopy
 	}
 }
 
@@ -56,6 +59,7 @@ func NewWSConnectionWithPath(tr api.Transport, pool api.BufferPool, channelSize 
 		inbox:     make(chan *WSFrame, channelSize),
 		outbox:    make(chan *WSFrame, channelSize),
 		done:      make(chan struct{}),
+		recvQueue: make(chan api.Buffer, 64), // Queue for RecvZeroCopy
 	}
 }
 
@@ -75,41 +79,52 @@ func (c *WSConnection) BufferPool() api.BufferPool {
 	return c.bufPool
 }
 
-// RecvZeroCopy performs zero-copy receive: it invokes transport.Recv(),
-// decodes frames, and returns pooled buffers containing payloads.
+// RecvZeroCopy performs zero-copy receive:
+// If recvLoop is running (using recvQueue), reads from internal queue
+// Otherwise, reads directly from transport
 func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
-	raws, err := c.transport.Recv()
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]api.Buffer, 0, len(raws))
-	for _, raw := range raws {
-		frame, err := DecodeFrameFromBytes(raw)
+	// Read from internal recvQueue if available (when recvLoop is active)
+	select {
+	case buf := <-c.recvQueue:
+		return []api.Buffer{buf}, nil
+	case <-c.done:
+		return nil, api.ErrTransportClosed
+	default:
+		// Fallback to direct transport read if recvQueue is empty
+		// This is only for cases when recvLoop isn't running
+		raws, err := c.transport.Recv()
 		if err != nil {
-			continue
+			return nil, err
 		}
 
-		// Validate that frame payload length is within reasonable bounds
-		if frame.PayloadLen < 0 || frame.PayloadLen > MaxFramePayload {
-			continue // Skip invalid frames to prevent resource exhaustion
+		result := make([]api.Buffer, 0, len(raws))
+		for _, raw := range raws {
+			frame, err := DecodeFrameFromBytes(raw)
+			if err != nil {
+				continue
+			}
+
+			// Validate that frame payload length is within reasonable bounds
+			if frame.PayloadLen < 0 || frame.PayloadLen > MaxFramePayload {
+				continue // Skip invalid frames to prevent resource exhaustion
+			}
+
+			buf := c.bufPool.Get(int(frame.PayloadLen), -1)
+
+			// Perform bounds checking before copying
+			payloadBytes := buf.Bytes()
+			if len(payloadBytes) < len(frame.Payload) {
+				// Truncate payload to fit buffer size if necessary
+				frame.Payload = frame.Payload[:len(payloadBytes)]
+			}
+			copy(payloadBytes, frame.Payload)
+
+			atomic.AddInt64(&c.framesReceived, 1)
+			atomic.AddInt64(&c.bytesReceived, frame.PayloadLen)
+			result = append(result, buf)
 		}
-
-		buf := c.bufPool.Get(int(frame.PayloadLen), -1)
-
-		// Perform bounds checking before copying
-		payloadBytes := buf.Bytes()
-		if len(payloadBytes) < len(frame.Payload) {
-			// Truncate payload to fit buffer size if necessary
-			frame.Payload = frame.Payload[:len(payloadBytes)]
-		}
-		copy(payloadBytes, frame.Payload)
-
-		atomic.AddInt64(&c.framesReceived, 1)
-		atomic.AddInt64(&c.bytesReceived, frame.PayloadLen)
-		result = append(result, buf)
+		return result, nil
 	}
-	return result, nil
 }
 
 // SendFrame enqueues a WSFrame for outbound transmission.
@@ -118,22 +133,32 @@ func (c *WSConnection) SendFrame(frame *WSFrame) error {
 		return api.ErrTransportClosed
 	}
 
-	select {
-	case c.outbox <- frame:
-		atomic.AddInt64(&c.framesSent, 1)
-		atomic.AddInt64(&c.bytesSent, frame.PayloadLen)
-		return nil
-	case <-c.done:
-		return api.ErrTransportClosed
-	default:
-		return errors.New("outbox is full")
+	// Try to send directly via transport if sendLoop is not running
+	// Use masked encoding if this is a client connection (indicated by Masked field)
+	data, err := EncodeFrameToBytesWithMask(frame, frame.Masked)
+	if err != nil {
+		return err
 	}
+
+	// Send directly via transport (bypass outbox channel)
+	if sendErr := c.transport.Send([][]byte{data}); sendErr != nil {
+		return sendErr
+	}
+
+	atomic.AddInt64(&c.framesSent, 1)
+	atomic.AddInt64(&c.bytesSent, frame.PayloadLen)
+	return nil
 }
 
 // Start launches receive and send loops.
 func (c *WSConnection) Start() {
 	go c.recvLoop()
 	go c.sendLoop()
+}
+
+// GetInboxChan returns the inbox channel for receiving incoming frames.
+func (c *WSConnection) GetInboxChan() <-chan *WSFrame {
+	return c.inbox
 }
 
 // Close initiates shutdown: signals loops and closes transport.
@@ -198,25 +223,34 @@ func (c *WSConnection) recvLoop() {
 					return
 				}
 
-				// Invoke handler directly if set, dispatching in separate goroutine
-				c.mu.RLock()
-				h := c.handler
-				c.mu.RUnlock()
-				if h != nil {
-					// Validate that frame payload length is within reasonable bounds
-					if frame.PayloadLen <= MaxFramePayload && frame.PayloadLen >= 0 {
-						buf := c.bufPool.Get(int(frame.PayloadLen), -1)
-						// Perform bounds checking before copying
-						payloadBytes := buf.Bytes()
-						if len(payloadBytes) < len(frame.Payload) {
-							// Truncate payload to fit buffer size if necessary
-							frame.Payload = frame.Payload[:len(payloadBytes)]
-						}
-						copy(payloadBytes, frame.Payload)
+				// Create buffer for frame payload to make it available for both inbox and recvQueue
+				if frame.PayloadLen <= MaxFramePayload && frame.PayloadLen >= 0 {
+					buf := c.bufPool.Get(int(frame.PayloadLen), -1)
+					// Perform bounds checking before copying
+					payloadBytes := buf.Bytes()
+					if len(payloadBytes) < len(frame.Payload) {
+						// Truncate payload to fit buffer size if necessary
+						frame.Payload = frame.Payload[:len(payloadBytes)]
+					}
+					copy(payloadBytes, frame.Payload)
+
+					// Invoke handler directly if set, dispatching in separate goroutine
+					c.mu.RLock()
+					h := c.handler
+					c.mu.RUnlock()
+					if h != nil {
 						go func(b api.Buffer) {
 							defer b.Release()
 							h.Handle(b)
 						}(buf)
+					}
+
+					// Also send to recvQueue for RecvZeroCopy calls
+					select {
+					case c.recvQueue <- buf:
+					default:
+						// Queue full, release the buffer to prevent memory leak
+						buf.Release()
 					}
 				}
 			}

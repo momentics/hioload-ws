@@ -130,19 +130,32 @@ func (s *Server) handleConnWithTracking(conn *protocol.WSConnection, poller api.
 			s.connMu.Unlock()
 		}
 	}()
+
+	// Use the connection's inbox channel to receive frames that are processed by recvLoop
+	// This avoids competing with recvLoop for transport data
 	for {
-		bufs, err := conn.RecvZeroCopy()
-		if err != nil {
+		select {
+		case <-conn.Done(): // Connection closed
 			return
-		}
-		for _, buf := range bufs {
-			// Push each buffer as a bufEvent into the reactor's inbox.
-			// Create an event that contains both the buffer and the connection context
-			event := bufEventWithConn{buf: buf, conn: conn}
-			poller.Push(event)
+		case frame := <-conn.GetInboxChan(): // Get frame from connection's inbox
+			if frame != nil {
+				// Convert frame payload to buffer for processing
+				buf := conn.BufferPool().Get(int(frame.PayloadLen), -1)
+				payloadBytes := buf.Bytes()
+				if len(payloadBytes) >= len(frame.Payload) {
+					copy(payloadBytes, frame.Payload)
+					// Push each buffer as a bufEvent into the reactor's inbox.
+					// Create an event that contains both the buffer and the connection context
+					event := bufEventWithConn{buf: buf, conn: conn}
+					poller.Push(event)
+				} else {
+					buf.Release() // Release if payload is too large for buffer
+				}
+			}
 		}
 	}
 }
+
 
 // Shutdown signals Run to stop accepting and processing.
 func (s *Server) Shutdown() {
