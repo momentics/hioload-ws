@@ -37,9 +37,13 @@ type WSConnection struct {
 	bytesSent      int64
 	framesReceived int64
 	framesSent     int64
-	
-	loopRunning    int32 // Atomic flag
-	readBuf        []byte
+
+	loopRunning int32 // Atomic flag
+	readBuf     []byte
+}
+
+var frameEncodePool = sync.Pool{
+	New: func() any { return make([]byte, 0, 64*1024) },
 }
 
 // NewWSConnection constructs a WSConnection with specified channel capacity and path.
@@ -100,17 +104,12 @@ func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
 			if frame.PayloadLen < 0 || frame.PayloadLen > MaxFramePayload {
 				return nil, nil
 			}
-			buf := c.bufPool.Get(int(frame.PayloadLen), -1)
-			payloadBytes := buf.Bytes()
-			payloadLen := int(frame.PayloadLen)
-			if payloadLen > len(payloadBytes) {
-				payloadLen = len(payloadBytes)
+			payload := frame.Payload
+			if len(payload) > int(frame.PayloadLen) {
+				payload = payload[:frame.PayloadLen]
 			}
-			copy(payloadBytes[:payloadLen], frame.Payload)
-			// Slice buffer to actual payload size
-			slicedBuf := buf.Slice(0, payloadLen)
-			// fmt.Printf("DEBUG: RecvZeroCopy Loop Mode returning buf len %d\n", payloadLen)
-			return []api.Buffer{slicedBuf}, nil
+			// Avoid an extra copy: wrap the payload directly.
+			return []api.Buffer{{Data: payload, NUMA: -1, Class: len(payload)}}, nil
 		case <-c.done:
 			return nil, api.ErrTransportClosed
 		}
@@ -119,7 +118,7 @@ func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
 		// fmt.Println("DEBUG: RecvZeroCopy Reading Transport")
 		raws, err := c.transport.Recv()
 		if err != nil {
-		// fmt.Printf("DEBUG: Direct Mode Transport Recv Error: %v\n", err)
+			// fmt.Printf("DEBUG: Direct Mode Transport Recv Error: %v\n", err)
 			return nil, err
 		}
 		// fmt.Printf("DEBUG: Server Recv got %d buffers\n", len(raws))
@@ -144,39 +143,32 @@ func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
 
 			// Valid frame
 			if frame.PayloadLen < 0 || frame.PayloadLen > MaxFramePayload {
-				// Fatal error or skip? 
+				// Fatal error or skip?
 				// DecodeFrameFromBytes handles max payload check.
 				// But just in case.
 				c.readBuf = c.readBuf[consumed:]
 				continue
 			}
 
-			buf := c.bufPool.Get(int(frame.PayloadLen), -1)
-			payloadBytes := buf.Bytes()
-			// Ensure we only use the actual payload length, not the full buffer size
-			payloadLen := int(frame.PayloadLen)
-			if payloadLen > len(payloadBytes) {
-				payloadLen = len(payloadBytes)
-			}
-			copy(payloadBytes[:payloadLen], frame.Payload)
-			
-			// Create a sliced buffer that represents only the actual payload
-			slicedBuf := buf.Slice(0, payloadLen)
-
 			// Update metrics manually
 			atomic.AddInt64(&c.framesReceived, 1)
 			atomic.AddInt64(&c.bytesReceived, frame.PayloadLen)
-			result = append(result, slicedBuf)
+
+			payload := frame.Payload
+			if len(payload) > int(frame.PayloadLen) {
+				payload = payload[:frame.PayloadLen]
+			}
+			result = append(result, api.Buffer{Data: payload, NUMA: -1, Class: len(payload)})
 
 			// Advance buffer
 			c.readBuf = c.readBuf[consumed:]
 		}
-		
+
 		// Optimization: Reset nil if empty to release memory
 		if len(c.readBuf) == 0 {
 			c.readBuf = nil
 		}
-		
+
 		return result, nil
 	}
 }
@@ -189,15 +181,19 @@ func (c *WSConnection) SendFrame(frame *WSFrame) error {
 
 	// Try to send directly via transport if sendLoop is not running
 	// Use masked encoding if this is a client connection (indicated by Masked field)
-	data, err := EncodeFrameToBytesWithMask(frame, frame.Masked)
+	scratch := frameEncodePool.Get().([]byte)
+	data, err := EncodeFrameToBufferWithMask(frame, frame.Masked, scratch[:0])
 	if err != nil {
+		frameEncodePool.Put(scratch[:0])
 		return err
 	}
 
 	// Send directly via transport (bypass outbox channel)
 	if sendErr := c.transport.Send([][]byte{data}); sendErr != nil {
+		frameEncodePool.Put(data[:0])
 		return sendErr
 	}
+	frameEncodePool.Put(data[:0])
 
 	atomic.AddInt64(&c.framesSent, 1)
 	atomic.AddInt64(&c.bytesSent, frame.PayloadLen)
@@ -266,7 +262,7 @@ func (c *WSConnection) recvLoop() {
 				c.readBuf = append(c.readBuf, raw...)
 			}
 
-		for len(c.readBuf) > 0 {
+			for len(c.readBuf) > 0 {
 				frame, consumed, err := DecodeFrameFromBytes(c.readBuf)
 				if err != nil {
 					// fmt.Printf("DEBUG: Loop Decode Error: %v\n", err)
@@ -275,18 +271,18 @@ func (c *WSConnection) recvLoop() {
 				if consumed == 0 {
 					break // Incomplete
 				}
-				
+
 				// fmt.Printf("DEBUG: Loop Decoded frame, opcode=%d, payloadLen=%d\n", frame.Opcode, frame.PayloadLen)
 
 				atomic.AddInt64(&c.framesReceived, 1)
 				atomic.AddInt64(&c.bytesReceived, frame.PayloadLen)
-				
-				// CRITICAL: Copy payload before advancing readBuf, as frame.Payload 
+
+				// CRITICAL: Copy payload before advancing readBuf, as frame.Payload
 				// is a slice into readBuf which will be overwritten on next iteration
 				payloadCopy := make([]byte, len(frame.Payload))
 				copy(payloadCopy, frame.Payload)
 				frame.Payload = payloadCopy
-				
+
 				// Advance buffer immediately
 				c.readBuf = c.readBuf[consumed:]
 
@@ -334,7 +330,7 @@ func (c *WSConnection) recvLoop() {
 				// So frame goes to BOTH?
 				// Yes.
 				// I should preserve this behavior.
-				
+
 				c.mu.RLock()
 				h := c.handler
 				c.mu.RUnlock()
@@ -353,7 +349,7 @@ func (c *WSConnection) recvLoop() {
 					}(buf)
 				}
 			}
-			
+
 			if len(c.readBuf) == 0 {
 				c.readBuf = nil
 			}

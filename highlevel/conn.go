@@ -98,7 +98,7 @@ func (c *Conn) GetUnderlyingWSConnection() *protocol.WSConnection {
 
 // ReadJSON unmarshals the next JSON message from the connection.
 func (c *Conn) ReadJSON(v interface{}) error {
-	_, payload, err := c.readMessage()
+	_, payload, err := c.ReadMessage()
 	if err != nil {
 		return err
 	}
@@ -119,23 +119,43 @@ func (c *Conn) WriteJSON(v interface{}) error {
 	return c.WriteMessage(int(BinaryMessage), data)
 }
 
-// ReadMessage reads a message from the connection.
+// ReadMessage reads a message from the connection and returns a safe copy.
+// For zero-copy callers, use ReadBuffer and release the buffer when done.
 func (c *Conn) ReadMessage() (messageType int, p []byte, err error) {
-	return c.readMessage()
+	mt, buf, err := c.readBuffer()
+	if err != nil {
+		return 0, nil, err
+	}
+	defer buf.Release()
+
+	payload := buf.Bytes()
+	if c.readLimit > 0 && int64(len(payload)) > c.readLimit {
+		return 0, nil, errors.New("message exceeds read limit")
+	}
+
+	out := make([]byte, len(payload))
+	copy(out, payload)
+	return mt, out, nil
 }
 
-// internal readMessage function that returns the raw message
-func (c *Conn) readMessage() (messageType int, p []byte, err error) {
+// ReadBuffer returns the next message without copying.
+// Caller must call buf.Release() when finished.
+func (c *Conn) ReadBuffer() (int, api.Buffer, error) {
+	return c.readBuffer()
+}
+
+// internal readBuffer function that returns the raw buffer
+func (c *Conn) readBuffer() (messageType int, buf api.Buffer, err error) {
 	c.mutex.RLock()
 	if c.closed {
 		c.mutex.RUnlock()
-		return 0, nil, errors.New("connection closed")
+		return 0, api.Buffer{}, errors.New("connection closed")
 	}
 	c.mutex.RUnlock()
 
 	// Server-side connections consume data pushed by the reactor into the queue
 	if c.client == nil && c.incoming != nil {
-		return c.readFromIncoming()
+		return c.readBufferFromIncoming()
 	}
 
 	// Use zero-copy receive method with timeout
@@ -144,45 +164,31 @@ func (c *Conn) readMessage() (messageType int, p []byte, err error) {
 	// Get the underlying connection properly (for clients, this comes from the client instance)
 	wsConn := c.GetUnderlyingWSConnection()
 	if wsConn == nil {
-		return 0, nil, errors.New("no underlying connection available")
+		return 0, api.Buffer{}, errors.New("no underlying connection available")
 	}
 
 	if c.readTimeout > 0 {
-		// Use timeout channel for synchronization without blocking
-		done := make(chan struct {
-			buffers []api.Buffer
-			err     error
-		}, 1)
-
-		go func() {
-			buffs, recvErr := wsConn.RecvZeroCopy()
-			done <- struct {
-				buffers []api.Buffer
-				err     error
-			}{buffs, recvErr}
-		}()
-
-		select {
-		case result := <-done:
-			if result.err != nil {
-				return 0, nil, result.err
-			}
-			buffers = result.buffers
-		case <-time.After(c.readTimeout):
-			return 0, nil, errors.New("read timeout")
+		if rd, ok := wsConn.Transport().(interface{ SetReadDeadline(time.Time) error }); ok {
+			rd.SetReadDeadline(time.Now().Add(c.readTimeout))
 		}
-	} else {
-		buffers, err = wsConn.RecvZeroCopy()
-		if err != nil {
-			return 0, nil, err
-		}
+	}
+
+	buffers, err = wsConn.RecvZeroCopy()
+	if err != nil {
+		return 0, api.Buffer{}, err
 	}
 
 	if len(buffers) == 0 {
-		return 0, nil, errors.New("no message received")
+		return 0, api.Buffer{}, errors.New("no message received")
 	}
 
-	return c.consumeBuffer(buffers[0])
+	buf = buffers[0]
+	if c.readLimit > 0 && int64(len(buf.Bytes())) > c.readLimit {
+		buf.Release()
+		return 0, api.Buffer{}, errors.New("message exceeds read limit")
+	}
+
+	return int(BinaryMessage), buf, nil
 }
 
 // WriteMessage writes a message to the connection.
@@ -449,16 +455,24 @@ func (c *Conn) enqueueIncoming(buf api.Buffer) {
 	default:
 	}
 
-	// If the queue is full, block until space is available or the connection closes.
-	for {
-		select {
-		case c.incoming <- buf:
-			return
-		case <-done:
-			buf.Release()
+	// Offload blocking enqueue to a goroutine so the poller isn't stalled.
+	go func() {
+		if done == nil {
+			select {
+			case c.incoming <- buf:
+			default:
+				// If still blocked, fall back to a blocking send.
+				c.incoming <- buf
+			}
 			return
 		}
-	}
+
+		select {
+		case c.incoming <- buf:
+		case <-done:
+			buf.Release()
+		}
+	}()
 }
 
 // runHandlerOnce ensures the provided handler is started only once per connection.
@@ -468,11 +482,12 @@ func (c *Conn) runHandlerOnce(handler func(*Conn)) {
 	})
 }
 
-// readFromIncoming pulls a buffer from the inbound queue respecting deadlines.
-func (c *Conn) readFromIncoming() (int, []byte, error) {
-	var timeout <-chan time.Time
+// readBufferFromIncoming pulls a buffer from the inbound queue respecting deadlines.
+func (c *Conn) readBufferFromIncoming() (int, api.Buffer, error) {
+	var timer *time.Timer
 	if c.readTimeout > 0 {
-		timeout = time.After(c.readTimeout)
+		timer = time.NewTimer(c.readTimeout)
+		defer timer.Stop()
 	}
 
 	var done <-chan struct{}
@@ -480,50 +495,29 @@ func (c *Conn) readFromIncoming() (int, []byte, error) {
 		done = ws.Done()
 	}
 
-	if timeout != nil {
+	if timer != nil {
 		select {
 		case buf := <-c.incoming:
 			if buf.Data == nil {
-				return 0, nil, errors.New("connection closed")
+				return 0, api.Buffer{}, errors.New("connection closed")
 			}
-			return c.consumeBuffer(buf)
-		case <-timeout:
-			return 0, nil, errors.New("read timeout")
+			return int(BinaryMessage), buf, nil
+		case <-timer.C:
+			return 0, api.Buffer{}, errors.New("read timeout")
 		case <-done:
-			return 0, nil, errors.New("connection closed")
+			return 0, api.Buffer{}, errors.New("connection closed")
 		}
 	}
 
 	select {
 	case buf := <-c.incoming:
 		if buf.Data == nil {
-			return 0, nil, errors.New("connection closed")
+			return 0, api.Buffer{}, errors.New("connection closed")
 		}
-		return c.consumeBuffer(buf)
+		return int(BinaryMessage), buf, nil
 	case <-done:
-		return 0, nil, errors.New("connection closed")
+		return 0, api.Buffer{}, errors.New("connection closed")
 	}
-}
-
-// consumeBuffer copies data out of the provided buffer and releases it.
-func (c *Conn) consumeBuffer(buf api.Buffer) (int, []byte, error) {
-	data := buf.Bytes()
-
-	if c.readLimit > 0 && int64(len(data)) > c.readLimit {
-		if c.autoRelease {
-			buf.Release()
-		}
-		return 0, nil, errors.New("message exceeds read limit")
-	}
-
-	result := make([]byte, len(data))
-	copy(result, data)
-
-	if c.autoRelease {
-		buf.Release()
-	}
-
-	return int(BinaryMessage), result, nil
 }
 
 // Param gets the value of a parameter by name.
@@ -547,7 +541,7 @@ func (c *Conn) AllParams() map[string]string {
 
 // ReadString reads a UTF-8 string message from the connection.
 func (c *Conn) ReadString() (string, error) {
-	_, payload, err := c.readMessage()
+	_, payload, err := c.ReadMessage()
 	if err != nil {
 		return "", err
 	}

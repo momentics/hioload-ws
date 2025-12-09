@@ -37,11 +37,9 @@ func (t *transport) Send(bufs [][]byte) error {
 }
 
 func (t *transport) Recv() ([][]byte, error) {
-	buf := t.bufPool.Get(t.bufSize, -1)
-	data := buf.Bytes()
+	data := make([]byte, t.bufSize)
 	n, err := t.conn.Read(data)
 	if err != nil {
-		buf.Release()
 		return nil, fmt.Errorf("recv error: %w", err)
 	}
 	return [][]byte{data[:n]}, nil

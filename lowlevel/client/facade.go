@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/core/concurrency"
 	"github.com/momentics/hioload-ws/pool"
 	"github.com/momentics/hioload-ws/protocol"
 )
@@ -57,9 +56,24 @@ type Client struct {
 	transport api.Transport
 	conn      *protocol.WSConnection
 	sendBatch *Batch
+	flushCh   chan struct{}
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+}
+
+var encodedFramePool = sync.Pool{
+	New: func() any { return make([]byte, 0, 64*1024) },
+}
+
+type slicePoolReleaser struct {
+	pool *sync.Pool
+}
+
+func (s slicePoolReleaser) Put(b api.Buffer) {
+	if s.pool != nil {
+		s.pool.Put(b.Data[:0])
+	}
 }
 
 // NewClient initializes, handshakes, and starts I/O loops.
@@ -74,8 +88,8 @@ func NewClient(cfg *Config) (*Client, error) {
 		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
 
-	// Setup buffer pool manager
-	mgr := pool.NewBufferPoolManager(concurrency.NUMANodes())
+	// Setup shared buffer pool manager
+	mgr := pool.DefaultManager()
 
 	var tr api.Transport
 
@@ -141,6 +155,7 @@ func NewClient(cfg *Config) (*Client, error) {
 		transport: tr,
 		conn:      ws,
 		sendBatch: NewBatch(cfg.BatchSize),
+		flushCh:   make(chan struct{}, 1),
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -213,19 +228,22 @@ func (c *Client) Send(msg []byte) {
 		Payload:    msg,
 	}
 
-	raw, err := protocol.EncodeFrameToBytesWithMask(frame, true)
+	scratch := encodedFramePool.Get().([]byte)
+	raw, err := protocol.EncodeFrameToBufferWithMask(frame, true, scratch[:0])
 	if err != nil {
+		encodedFramePool.Put(scratch[:0])
 		// Drop message on error (or log?)
 		return
 	}
 
 	// Use custom buffer to avoid pool pollution with variable sizes
-	// Use api.Buffer directly with nil Pool (no-op release)
-	buf := api.Buffer{Data: raw, NUMA: -1, Pool: nil}
+	buf := api.Buffer{Data: raw, NUMA: -1, Pool: slicePoolReleaser{pool: &encodedFramePool}}
 	c.sendBatch.Append(buf)
 	if c.sendBatch.Len() >= c.cfg.BatchSize {
 		c.flush()
+		return
 	}
+	c.signalFlush()
 }
 
 // frameBuffer removed as api.Buffer struct handles this case natively
@@ -241,30 +259,34 @@ func (c *Client) Recv() ([]api.Buffer, error) {
 	return c.conn.RecvZeroCopy()
 }
 
-// ReadMessage reads a single message from the connection.
+// ReadMessage reads a single message from the connection (copying the payload).
 func (c *Client) ReadMessage() (messageType int, p []byte, err error) {
-	buffers, err := c.conn.RecvZeroCopy()
+	mt, buf, err := c.ReadBuffer()
 	if err != nil {
 		return 0, nil, err
 	}
+	defer buf.Release()
 
-	if len(buffers) == 0 {
-		return 0, nil, fmt.Errorf("no message received")
-	}
-
-	// Get the first buffer
-	buf := buffers[0]
 	data := buf.Bytes()
-
-	// Create a copy of the data to return
 	result := make([]byte, len(data))
 	copy(result, data)
 
-	// Release the buffer (important for zero-copy semantics)
-	buf.Release()
-
 	// For now, return binary type - in real implementation we'd get this from frame
-	return int(protocol.OpcodeBinary), result, nil
+	return mt, result, nil
+}
+
+// ReadBuffer returns the next message without copying. Caller must Release().
+func (c *Client) ReadBuffer() (int, api.Buffer, error) {
+	buffers, err := c.conn.RecvZeroCopy()
+	if err != nil {
+		return 0, api.Buffer{}, err
+	}
+
+	if len(buffers) == 0 {
+		return 0, api.Buffer{}, fmt.Errorf("no message received")
+	}
+
+	return int(protocol.OpcodeBinary), buffers[0], nil
 }
 
 // WriteMessage writes a message to the connection.
@@ -342,7 +364,7 @@ func (c *Client) GetWSConnection() *protocol.WSConnection {
 // sendLoop flushes batches on context cancellation or flush triggers.
 func (c *Client) sendLoop() {
 	defer c.wg.Done()
-	ticker := time.NewTicker(10 * time.Millisecond)
+	ticker := time.NewTicker(2 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -350,6 +372,8 @@ func (c *Client) sendLoop() {
 			c.flush()
 			return
 		case <-ticker.C:
+			c.flush()
+		case <-c.flushCh:
 			c.flush()
 		}
 	}
@@ -373,6 +397,14 @@ func (c *Client) flush() {
 	}
 	for _, b := range batch {
 		b.Release()
+	}
+}
+
+// signalFlush requests an immediate flush without blocking the caller.
+func (c *Client) signalFlush() {
+	select {
+	case c.flushCh <- struct{}{}:
+	default:
 	}
 }
 

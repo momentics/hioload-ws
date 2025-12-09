@@ -66,7 +66,7 @@ func DecodeFrameFromBytes(raw []byte) (*WSFrame, int, error) {
 		return nil, 0, nil // Incomplete
 	}
 
-	payloadData := raw[offset : totalLen]
+	payloadData := raw[offset:totalLen]
 	payload := make([]byte, length)
 	if masked {
 		for i := int64(0); i < length; i++ {
@@ -92,9 +92,9 @@ func EncodeFrameToBytes(f *WSFrame) ([]byte, error) {
 	return EncodeFrameToBytesWithMask(f, f.Masked)
 }
 
-// EncodeFrameToBytesWithMask serializes WSFrame into []byte with specific mask setting,
-// enforcing maximum payload size.
-func EncodeFrameToBytesWithMask(f *WSFrame, mask bool) ([]byte, error) {
+// EncodeFrameToBufferWithMask serializes WSFrame into a caller-managed buffer,
+// minimizing allocations. Returned slice aliases dst.
+func EncodeFrameToBufferWithMask(f *WSFrame, mask bool, dst []byte) ([]byte, error) {
 	if f.PayloadLen > MaxFramePayload {
 		return nil, errors.New("frame payload exceeds maximum allowed size")
 	}
@@ -106,64 +106,57 @@ func EncodeFrameToBytesWithMask(f *WSFrame, mask bool) ([]byte, error) {
 	b0 |= (f.Opcode & 0x0F)
 
 	plen := int(f.PayloadLen)
-	var hdr []byte
+	var hdr [10]byte
+	var header []byte
 
 	switch {
 	case plen <= 125:
-		hdr = []byte{b0, 0}
+		header = hdr[:2]
+		header[0] = b0
 		if mask {
-			hdr[1] = byte(plen) | 0x80  // Set mask bit
+			header[1] = byte(plen) | 0x80 // Set mask bit
 		} else {
-			hdr[1] = byte(plen)
+			header[1] = byte(plen)
 		}
 	case plen <= 0xFFFF:
-		hdr = make([]byte, 4)
-		hdr[0] = b0
+		header = hdr[:4]
+		header[0] = b0
 		if mask {
-			hdr[1] = 126 | 0x80  // Set mask bit
+			header[1] = 126 | 0x80 // Set mask bit
 		} else {
-			hdr[1] = 126
+			header[1] = 126
 		}
-		binary.BigEndian.PutUint16(hdr[2:], uint16(plen))
+		binary.BigEndian.PutUint16(header[2:], uint16(plen))
 	default:
-		hdr = make([]byte, 10)
-		hdr[0] = b0
+		header = hdr[:10]
+		header[0] = b0
 		if mask {
-			hdr[1] = 127 | 0x80  // Set mask bit
+			header[1] = 127 | 0x80 // Set mask bit
 		} else {
-			hdr[1] = 127
+			header[1] = 127
 		}
-		binary.BigEndian.PutUint64(hdr[2:], uint64(plen))
+		binary.BigEndian.PutUint64(header[2:], uint64(plen))
 	}
 
-	var totalLen int
+	dst = append(dst[:0], header...)
 	if mask {
-		totalLen = len(hdr) + 4 + plen  // header + mask key + payload
-	} else {
-		totalLen = len(hdr) + plen      // header + payload
+		maskKey := [4]byte{0x12, 0x34, 0x56, 0x78} // Example mask key
+		dst = append(dst, maskKey[:]...)
 	}
 
-	buf := make([]byte, totalLen)
-	copy(buf, hdr)
-
-	payloadStart := len(hdr)
+	start := len(dst)
+	dst = append(dst, f.Payload...)
 	if mask {
-		// Generate random mask key (in production, use crypto/rand)
-		// For simplicity, using a static mask key for now, but should be random
-		maskKey := [4]byte{0x12, 0x34, 0x56, 0x78}  // Example mask key
-		copy(buf[payloadStart:], maskKey[:])
-		payloadStart += 4
-
-		// Apply mask to payload
-		maskedPayload := make([]byte, len(f.Payload))
-		copy(maskedPayload, f.Payload)
-		for i := 0; i < len(maskedPayload); i++ {
-			maskedPayload[i] ^= maskKey[i%4]
+		for i := 0; i < plen; i++ {
+			dst[start+i] ^= dst[len(header)+(i%4)]
 		}
-		copy(buf[payloadStart:], maskedPayload)
-	} else {
-		copy(buf[payloadStart:], f.Payload)
 	}
 
-	return buf, nil
+	return dst, nil
+}
+
+// EncodeFrameToBytesWithMask serializes WSFrame into []byte with specific mask setting,
+// enforcing maximum payload size.
+func EncodeFrameToBytesWithMask(f *WSFrame, mask bool) ([]byte, error) {
+	return EncodeFrameToBufferWithMask(f, mask, nil)
 }

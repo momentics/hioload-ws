@@ -12,7 +12,6 @@ import (
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
-	"github.com/momentics/hioload-ws/internal/concurrency"
 	"github.com/momentics/hioload-ws/internal/transport"
 	"github.com/momentics/hioload-ws/pool"
 )
@@ -29,8 +28,8 @@ type Server struct {
 	executor   api.Executor
 	middleware []Middleware
 	shutdownCh chan struct{}
-	connCount  int64          // current number of active connections
-	connMu     sync.RWMutex   // mutex to protect connection count
+	connCount  int64        // current number of active connections
+	connMu     sync.RWMutex // mutex to protect connection count
 }
 
 // NewServer constructs a Server facade with the given Config and options.
@@ -43,9 +42,8 @@ func NewServer(cfg *Config, opts ...ServerOption) (*Server, error) {
 	// 1. ControlAdapter for dynamic config, metrics, debug probes, hot-reload
 	ctrl := adapters.NewControlAdapter()
 
-	// 2. BufferPoolManager: one pool per NUMA node; choose preferred node or auto
-	nodeCount := concurrency.NUMANodes()
-	bufMgr := pool.NewBufferPoolManager(nodeCount)
+	// 2. BufferPoolManager: shared pools per NUMA node; choose preferred node or auto
+	bufMgr := pool.DefaultManager()
 	bufPool := bufMgr.GetPool(cfg.IOBufferSize, cfg.NUMANode)
 
 	// 3. WebSocket listener: zero‐copy buffers, per‐connection channels
@@ -84,7 +82,7 @@ func NewServer(cfg *Config, opts ...ServerOption) (*Server, error) {
 }
 
 func (s *Server) UseMiddleware(mw ...Middleware) {
-    s.middleware = append(s.middleware, mw...)
+	s.middleware = append(s.middleware, mw...)
 }
 
 // GetControl returns the ControlAdapter instance.

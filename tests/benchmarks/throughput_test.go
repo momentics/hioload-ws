@@ -278,10 +278,11 @@ func TestHighLevelThroughput(t *testing.T) {
 	// Receiver routine
 	go func() {
 		for {
-			_, _, err := conn.ReadMessage()
+			_, buf, err := conn.ReadBuffer()
 			if err != nil {
 				return
 			}
+			buf.Release()
 			atomic.AddUint64(&received, 1)
 		}
 	}()

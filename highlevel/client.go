@@ -11,7 +11,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/momentics/hioload-ws/internal/concurrency"
 	lowlevel_client "github.com/momentics/hioload-ws/lowlevel/client"
 	"github.com/momentics/hioload-ws/pool"
 )
@@ -67,9 +66,8 @@ func DialWithOptions(urlStr string, opts Options) (*Conn, error) {
 
 	wsConn := client.GetWSConnection()
 
-	// Create a buffer pool for the high-level connection wrapper
-	nodeCount := concurrency.NUMANodes()
-	bufPool := pool.NewBufferPoolManager(nodeCount).GetPool(opts.IOBufferSize, opts.NUMANode)
+	// Reuse the process-wide NUMA-aware buffer pools to avoid fragmentation
+	bufPool := pool.DefaultManager().GetPool(opts.IOBufferSize, opts.NUMANode)
 
 	// Use newClientConn to link the client instance (for WriteMessage delegating)
 	// highlevel/conn.go: func newClientConn(underlying *protocol.WSConnection, pool api.BufferPool, client *client.Client) *Conn

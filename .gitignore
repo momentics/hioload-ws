@@ -559,3 +559,4 @@ FodyWeavers.xsd
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,windows,linux,visualstudio,visualstudiocode,go
 coverage.html
+tests/benchmarks/chioload-wsdebug_log.txt
