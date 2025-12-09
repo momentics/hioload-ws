@@ -291,38 +291,30 @@ func (c *Client) ReadBuffer() (int, api.Buffer, error) {
 
 // WriteMessage writes a message to the connection.
 func (c *Client) WriteMessage(messageType int, data []byte) error {
-	// Get a buffer from the connection's buffer pool for zero-copy sending
-	buf := c.conn.BufferPool().Get(len(data), -1) // Use the connection's buffer pool
-
-	// Copy data to the buffer
-	dest := buf.Bytes()
-	usePool := len(dest) >= len(data)
-	if usePool {
-		copy(dest, data)
-	} else {
-		// Pool buffer too small; fall back to owned slice to avoid slicing panic
-		buf.Release()
-		dest = append([]byte(nil), data...)
-	}
-
 	// Create a frame - for client, frames must be masked per RFC 6455
 	frame := &protocol.WSFrame{
 		IsFinal:    true,
 		Opcode:     byte(messageType),
 		Masked:     true, // Client frames must be masked per RFC 6455
 		PayloadLen: int64(len(data)),
-		Payload:    dest[:len(data)],
+		Payload:    data,
 	}
 
-	// Send the frame
-	err := c.conn.SendFrame(frame)
-
-	// Release the buffer after sending
-	if usePool {
-		buf.Release()
+	scratch := encodedFramePool.Get().([]byte)
+	raw, err := protocol.EncodeFrameToBufferWithMask(frame, true, scratch[:0])
+	if err != nil {
+		encodedFramePool.Put(scratch[:0])
+		return err
 	}
 
-	return err
+	buf := api.Buffer{Data: raw, NUMA: -1, Pool: slicePoolReleaser{pool: &encodedFramePool}}
+	c.sendBatch.Append(buf)
+	if c.sendBatch.Len() >= c.cfg.BatchSize {
+		c.flush()
+	} else {
+		c.signalFlush()
+	}
+	return nil
 }
 
 // ReadJSON unmarshals the next JSON message from the connection.

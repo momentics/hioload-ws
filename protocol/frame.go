@@ -12,6 +12,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+
+	"github.com/momentics/hioload-ws/api"
 )
 
 // WSFrame represents a decoded WebSocket frame.
@@ -21,7 +23,8 @@ type WSFrame struct {
 	Masked     bool  // Whether the frame was masked
 	PayloadLen int64 // Actual payload length
 	MaskKey    [4]byte
-	Payload    []byte // Zero-copy reference (owner managed via pooling)
+	Payload    []byte     // Zero-copy reference (owner managed via pooling)
+	Buf        api.Buffer // Optional pooled buffer carrying the payload
 }
 
 // DecodeFrame parses the WebSocket frame header and payload from stream.

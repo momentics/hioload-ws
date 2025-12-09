@@ -16,11 +16,17 @@ type transport struct {
 	conn    net.Conn
 	bufPool api.BufferPool
 	bufSize int
+	rxBuf   api.Buffer
 }
 
 // NewTransport constructs a NUMA-aware, zero-copy transport.
 func NewTransport(conn net.Conn, bp api.BufferPool, bufSize int) api.Transport {
-	return &transport{conn: conn, bufPool: bp, bufSize: bufSize}
+	return &transport{
+		conn:    conn,
+		bufPool: bp,
+		bufSize: bufSize,
+		rxBuf:   bp.Get(bufSize, -1),
+	}
 }
 
 func (t *transport) GetBuffer() api.Buffer {
@@ -37,7 +43,11 @@ func (t *transport) Send(bufs [][]byte) error {
 }
 
 func (t *transport) Recv() ([][]byte, error) {
-	data := make([]byte, t.bufSize)
+	data := t.rxBuf.Bytes()
+	if len(data) < t.bufSize {
+		t.rxBuf = t.bufPool.Get(t.bufSize, -1)
+		data = t.rxBuf.Bytes()
+	}
 	n, err := t.conn.Read(data)
 	if err != nil {
 		return nil, fmt.Errorf("recv error: %w", err)
@@ -46,11 +56,14 @@ func (t *transport) Recv() ([][]byte, error) {
 }
 
 func (t *transport) Close() error {
+	if t.rxBuf.Data != nil {
+		t.rxBuf.Release()
+	}
 	return t.conn.Close()
 }
 
 func (t *transport) Features() api.TransportFeatures {
-	return api.TransportFeatures{ZeroCopy: true, Batch: true, NUMAAware: false}
+	return api.TransportFeatures{ZeroCopy: true, Batch: true, NUMAAware: true}
 }
 
 // Optional deadlines

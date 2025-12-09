@@ -38,7 +38,8 @@ type WSConnection struct {
 	framesReceived int64
 	framesSent     int64
 
-	loopRunning int32 // Atomic flag
+	loopRunning int32 // Atomic flag (recv+send loops running)
+	sendRunning int32 // Atomic flag (send loop running)
 	readBuf     []byte
 }
 
@@ -104,12 +105,20 @@ func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
 			if frame.PayloadLen < 0 || frame.PayloadLen > MaxFramePayload {
 				return nil, nil
 			}
+			if frame.Buf.Data != nil {
+				return []api.Buffer{frame.Buf}, nil
+			}
 			payload := frame.Payload
 			if len(payload) > int(frame.PayloadLen) {
 				payload = payload[:frame.PayloadLen]
 			}
-			// Avoid an extra copy: wrap the payload directly.
-			return []api.Buffer{{Data: payload, NUMA: -1, Class: len(payload)}}, nil
+			buf := c.bufPool.Get(len(payload), -1)
+			dst := buf.Bytes()
+			if len(dst) > len(payload) {
+				dst = dst[:len(payload)]
+			}
+			copy(dst, payload)
+			return []api.Buffer{buf.Slice(0, len(dst))}, nil
 		case <-c.done:
 			return nil, api.ErrTransportClosed
 		}
@@ -129,28 +138,19 @@ func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
 
 		result := make([]api.Buffer, 0, 4)
 		for len(c.readBuf) > 0 {
-			// fmt.Printf("DEBUG: Direct Mode Buffer Size: %d\n", len(c.readBuf))
 			frame, consumed, err := DecodeFrameFromBytes(c.readBuf)
 			if err != nil {
-				// fmt.Printf("DEBUG: Direct Decode Error: %v\n", err)
 				return nil, err
 			}
 			if consumed == 0 {
-				// fmt.Println("DEBUG: Direct Incomplete")
 				break // Incomplete frame
 			}
-			// fmt.Printf("DEBUG: Direct Decoded Frame Len: %d\n", frame.PayloadLen)
 
-			// Valid frame
 			if frame.PayloadLen < 0 || frame.PayloadLen > MaxFramePayload {
-				// Fatal error or skip?
-				// DecodeFrameFromBytes handles max payload check.
-				// But just in case.
 				c.readBuf = c.readBuf[consumed:]
 				continue
 			}
 
-			// Update metrics manually
 			atomic.AddInt64(&c.framesReceived, 1)
 			atomic.AddInt64(&c.bytesReceived, frame.PayloadLen)
 
@@ -158,13 +158,17 @@ func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
 			if len(payload) > int(frame.PayloadLen) {
 				payload = payload[:frame.PayloadLen]
 			}
-			result = append(result, api.Buffer{Data: payload, NUMA: -1, Class: len(payload)})
+			buf := c.bufPool.Get(len(payload), -1)
+			dst := buf.Bytes()
+			if len(dst) > len(payload) {
+				dst = dst[:len(payload)]
+			}
+			copy(dst, payload)
+			result = append(result, buf.Slice(0, len(dst)))
 
-			// Advance buffer
 			c.readBuf = c.readBuf[consumed:]
 		}
 
-		// Optimization: Reset nil if empty to release memory
 		if len(c.readBuf) == 0 {
 			c.readBuf = nil
 		}
@@ -177,6 +181,23 @@ func (c *WSConnection) RecvZeroCopy() ([]api.Buffer, error) {
 func (c *WSConnection) SendFrame(frame *WSFrame) error {
 	if atomic.LoadInt32(&c.closed) == 1 {
 		return api.ErrTransportClosed
+	}
+
+	// Ensure send loop is running for batching.
+	if atomic.LoadInt32(&c.sendRunning) == 0 {
+		if atomic.CompareAndSwapInt32(&c.sendRunning, 0, 1) {
+			go c.sendLoop()
+		}
+	}
+
+	// If background loops are running, prefer queueing for batching.
+	if atomic.LoadInt32(&c.sendRunning) == 1 {
+		select {
+		case c.outbox <- frame:
+			return nil
+		case <-c.done:
+			return api.ErrTransportClosed
+		}
 	}
 
 	// Try to send directly via transport if sendLoop is not running
@@ -203,6 +224,7 @@ func (c *WSConnection) SendFrame(frame *WSFrame) error {
 // Start launches receive and send loops.
 func (c *WSConnection) Start() {
 	atomic.StoreInt32(&c.loopRunning, 1)
+	atomic.StoreInt32(&c.sendRunning, 1)
 	go c.recvLoop()
 	go c.sendLoop()
 }
@@ -277,11 +299,8 @@ func (c *WSConnection) recvLoop() {
 				atomic.AddInt64(&c.framesReceived, 1)
 				atomic.AddInt64(&c.bytesReceived, frame.PayloadLen)
 
-				// CRITICAL: Copy payload before advancing readBuf, as frame.Payload
-				// is a slice into readBuf which will be overwritten on next iteration
-				payloadCopy := make([]byte, len(frame.Payload))
-				copy(payloadCopy, frame.Payload)
-				frame.Payload = payloadCopy
+				// Preserve payload slice; caller may wrap in Buffer without extra copies.
+				frame.Buf = api.Buffer{Data: frame.Payload}
 
 				// Advance buffer immediately
 				c.readBuf = c.readBuf[consumed:]
@@ -296,57 +315,20 @@ func (c *WSConnection) recvLoop() {
 				case c.inbox <- frame:
 					// fmt.Println("DEBUG: recvLoop pushed to inbox")
 				case <-c.done:
+					if frame.Buf.Data != nil {
+						frame.Buf.Release()
+					}
 					return
 				}
 
-				// Copy for Handler (legacy path?)
-				// Logic: If handler exists, invoke it?
-				// But we rely on inbox consumption.
-				// The original code checked handle + invoked.
-				// WE MUST KEEP ORIGINAL HANDLER LOGIC?
-				// Wait. Original logic: Check Handler -> Invoke.
-				// Logic inside `recvLoop` (Step 987):
-				/*
-					c.mu.RLock()
-					h := c.handler
-					c.mu.RUnlock()
-					if h != nil ... { ... copy & invoke ... }
-				*/
-				// But we are using RecvZeroCopy (Client) which reads inbox.
-				// Does Client use Handler? NO.
-				// Client uses RecvZeroCopy.
-				// Server uses RecvZeroCopy (Direct).
-				// So `recvLoop` Handler invocation is strictly for legacy/async handler registration?
-				// If Handler registered, RecvZeroCopy might steal data?
-				// `recvLoop` pushes to `inbox`.
-				// If `inbox` is consumed by `RecvZeroCopy`.
-				// THEN Handler is NOT invoked?
-				// Original code: Pushed to `recvQueue` OR `inbox`.
-				// Handler invocation logic was separate?
-				// No, step 987 logic:
-				// 1. Inbox Push.
-				// 2. Handler Invoke.
-				// BOTH.
-				// So frame goes to BOTH?
-				// Yes.
-				// I should preserve this behavior.
-
+				// Invoke handler inline to avoid goroutine churn.
 				c.mu.RLock()
 				h := c.handler
 				c.mu.RUnlock()
 
-				if h != nil && frame.PayloadLen <= MaxFramePayload && frame.PayloadLen >= 0 {
-					buf := c.bufPool.Get(int(frame.PayloadLen), -1)
-					payloadBytes := buf.Bytes()
-					if len(payloadBytes) < len(frame.Payload) {
-						frame.Payload = frame.Payload[:len(payloadBytes)]
-					}
-					copy(payloadBytes, frame.Payload)
-
-					go func(b api.Buffer) {
-						defer b.Release()
-						h.Handle(b)
-					}(buf)
+				if h != nil && frame.PayloadLen <= MaxFramePayload && frame.PayloadLen >= 0 && frame.Buf.Data != nil {
+					buf := frame.Buf
+					h.Handle(buf)
 				}
 			}
 
@@ -360,21 +342,49 @@ func (c *WSConnection) recvLoop() {
 // sendLoop reads frames from outbox, encodes them to bytes, and calls
 // transport.Send. On send errors, it closes the connection.
 func (c *WSConnection) sendLoop() {
+	const maxBatch = 32
+	type batchSlice [][]byte
+	var slicePool sync.Pool
+	slicePool.New = func() any { return make(batchSlice, 0, maxBatch) }
 	for {
 		select {
 		case <-c.done:
 			return
 		case frame := <-c.outbox:
-			// Use masked encoding if this is a client connection (indicated by Masked field)
-			data, err := EncodeFrameToBytesWithMask(frame, frame.Masked)
-			if err != nil {
+			frames := []*WSFrame{frame}
+			// Drain additional frames to batch send.
+			for len(frames) < maxBatch {
+				select {
+				case f := <-c.outbox:
+					frames = append(frames, f)
+				default:
+					goto encode
+				}
+			}
+		encode:
+			out := slicePool.Get().(batchSlice)[:0]
+			for _, fr := range frames {
+				scratch := frameEncodePool.Get().([]byte)
+				data, err := EncodeFrameToBufferWithMask(fr, fr.Masked, scratch[:0])
+				if err != nil {
+					frameEncodePool.Put(scratch[:0])
+					c.Close()
+					return
+				}
+				out = append(out, data)
+			}
+			if err := c.transport.Send(out); err != nil {
+				for _, buf := range out {
+					frameEncodePool.Put(buf[:0])
+				}
+				slicePool.Put(out[:0])
 				c.Close()
 				return
 			}
-			if err := c.transport.Send([][]byte{data}); err != nil {
-				c.Close()
-				return
+			for _, buf := range out {
+				frameEncodePool.Put(buf[:0])
 			}
+			slicePool.Put(out[:0])
 		}
 	}
 }

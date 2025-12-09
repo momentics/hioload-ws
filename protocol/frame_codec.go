@@ -67,13 +67,10 @@ func DecodeFrameFromBytes(raw []byte) (*WSFrame, int, error) {
 	}
 
 	payloadData := raw[offset:totalLen]
-	payload := make([]byte, length)
 	if masked {
 		for i := int64(0); i < length; i++ {
-			payload[i] = payloadData[i] ^ maskKey[i%4]
+			payloadData[i] ^= maskKey[i%4]
 		}
-	} else {
-		copy(payload, payloadData)
 	}
 
 	return &WSFrame{
@@ -82,7 +79,7 @@ func DecodeFrameFromBytes(raw []byte) (*WSFrame, int, error) {
 		Masked:     masked,
 		PayloadLen: length,
 		MaskKey:    maskKey,
-		Payload:    payload,
+		Payload:    payloadData,
 	}, totalLen, nil
 }
 

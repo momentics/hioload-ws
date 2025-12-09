@@ -40,8 +40,10 @@ type Conn struct {
 	// Callbacks
 	onClose func()
 	// Inbound queue for server-side connections fed by the event loop
-	incoming    chan api.Buffer
-	handlerOnce sync.Once
+	incoming     chan api.Buffer
+	handlerOnce  sync.Once
+	overflow     chan api.Buffer
+	overflowOnce sync.Once
 
 	// Client-specific fields (may be nil for server connections)
 	client *client.Client
@@ -455,24 +457,52 @@ func (c *Conn) enqueueIncoming(buf api.Buffer) {
 	default:
 	}
 
-	// Offload blocking enqueue to a goroutine so the poller isn't stalled.
-	go func() {
-		if done == nil {
-			select {
-			case c.incoming <- buf:
-			default:
-				// If still blocked, fall back to a blocking send.
-				c.incoming <- buf
-			}
-			return
-		}
+	// Overflow path: spill into a dedicated worker queue to avoid stalling poller.
+	c.startOverflowWorker(done)
+	select {
+	case c.overflow <- buf:
+	case <-done:
+		buf.Release()
+	}
+}
 
-		select {
-		case c.incoming <- buf:
-		case <-done:
-			buf.Release()
+// startOverflowWorker spins a single goroutine to drain overflow into incoming.
+func (c *Conn) startOverflowWorker(done <-chan struct{}) {
+	c.overflowOnce.Do(func() {
+		// Generous capacity to avoid drops under bursty load.
+		capacity := cap(c.incoming) * 8
+		if capacity < 2048 {
+			capacity = 2048
 		}
-	}()
+		c.overflow = make(chan api.Buffer, capacity)
+		go func() {
+			for {
+				select {
+				case buf := <-c.overflow:
+					for {
+						select {
+						case c.incoming <- buf:
+							goto next
+						case <-done:
+							buf.Release()
+							return
+						}
+					}
+				case <-done:
+					// Drain any pending buffers to release them.
+					for {
+						select {
+						case b := <-c.overflow:
+							b.Release()
+						default:
+							return
+						}
+					}
+				}
+			next:
+			}
+		}()
+	})
 }
 
 // runHandlerOnce ensures the provided handler is started only once per connection.
