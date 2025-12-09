@@ -25,13 +25,13 @@ type Conn struct {
 	pool       api.BufferPool
 
 	// Connection state
-	mutex      sync.RWMutex
-	closed     bool
-	closeOnce  sync.Once
+	mutex     sync.RWMutex
+	closed    bool
+	closeOnce sync.Once
 
 	// Configuration
-	readLimit  int64
-	readTimeout time.Duration
+	readLimit    int64
+	readTimeout  time.Duration
 	writeTimeout time.Duration
 
 	// Automatic buffer management
@@ -39,6 +39,9 @@ type Conn struct {
 
 	// Callbacks
 	onClose func()
+	// Inbound queue for server-side connections fed by the event loop
+	incoming    chan api.Buffer
+	handlerOnce sync.Once
 
 	// Client-specific fields (may be nil for server connections)
 	client *client.Client
@@ -54,6 +57,7 @@ func newConn(underlying *protocol.WSConnection, pool api.BufferPool) *Conn {
 		pool:        pool,
 		readLimit:   32 << 20, // 32MB default
 		autoRelease: true,
+		incoming:    make(chan api.Buffer, 128),
 		params:      make([]RouteParam, 0),
 	}
 }
@@ -66,6 +70,7 @@ func newConnWithParams(underlying *protocol.WSConnection, pool api.BufferPool, p
 		params:      params,
 		readLimit:   32 << 20, // 32MB default
 		autoRelease: true,
+		incoming:    make(chan api.Buffer, 128),
 	}
 }
 
@@ -97,7 +102,7 @@ func (c *Conn) ReadJSON(v interface{}) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Unmarshal JSON directly from the payload
 	return json.Unmarshal(payload, v)
 }
@@ -109,7 +114,7 @@ func (c *Conn) WriteJSON(v interface{}) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Use WriteMessage to send as binary
 	return c.WriteMessage(int(BinaryMessage), data)
 }
@@ -127,6 +132,11 @@ func (c *Conn) readMessage() (messageType int, p []byte, err error) {
 		return 0, nil, errors.New("connection closed")
 	}
 	c.mutex.RUnlock()
+
+	// Server-side connections consume data pushed by the reactor into the queue
+	if c.client == nil && c.incoming != nil {
+		return c.readFromIncoming()
+	}
 
 	// Use zero-copy receive method with timeout
 	var buffers []api.Buffer
@@ -172,30 +182,7 @@ func (c *Conn) readMessage() (messageType int, p []byte, err error) {
 		return 0, nil, errors.New("no message received")
 	}
 
-	// Get the first buffer
-	buf := buffers[0]
-	data := buf.Bytes()
-
-	// Check size limit
-	if c.readLimit > 0 && int64(len(data)) > c.readLimit {
-		if c.autoRelease {
-			buf.Release()
-		}
-		return 0, nil, errors.New("message exceeds read limit")
-	}
-
-	// Preserve zero-copy semantics by returning a copy to maintain high-level API simplicity
-	// while ensuring the original buffer can be released if autoRelease is enabled
-	result := make([]byte, len(data))
-	copy(result, data)
-
-	// Release the buffer (critical for preventing memory leaks in zero-copy system)
-	if c.autoRelease {
-		buf.Release()
-	}
-
-	// Return binary message type for now - in real implementation we'd get this from frame
-	return int(BinaryMessage), result, nil
+	return c.consumeBuffer(buffers[0])
 }
 
 // WriteMessage writes a message to the connection.
@@ -207,18 +194,23 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 	}
 	c.mutex.RUnlock()
 
-	// Set write timeout if configured
-	if c.writeTimeout > 0 {
-		// In the real implementation, we'd implement timeout handling
-		// This is a simplified version
+	// Client connections delegate directly to the low-level client which handles framing/masking.
+	if c.client != nil {
+		return c.client.WriteMessage(messageType, data)
 	}
 
 	// Get a buffer from the pool for zero-copy sending
-	buf := c.pool.Get(len(data), -1)  // Use appropriate NUMA node
-
-	// Copy data to the buffer
+	buf := c.pool.Get(len(data), -1) // Use appropriate NUMA node
 	dest := buf.Bytes()
-	copy(dest, data)
+	usePool := len(dest) >= len(data)
+
+	if usePool {
+		copy(dest, data)
+	} else {
+		// Pool buffer is smaller than payload; fall back to an owned slice.
+		buf.Release()
+		dest = append([]byte(nil), data...)
+	}
 
 	// Create a frame based on message type
 	var opcode byte
@@ -242,26 +234,14 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 		IsFinal:    true,
 		Opcode:     opcode,
 		PayloadLen: int64(len(data)),
-		Payload:    dest[:len(data)], // Use the buffer slice directly for zero-copy
+		Payload:    dest[:len(data)], // Use the buffer slice directly for zero-copy when possible
 	}
 
-	// For client connections, make sure frames are masked per RFC 6455
-	if c.client != nil {
-		frame.Masked = true
-	}
-
-	// Send the frame using the appropriate connection method
-	var sendErr error
-	if c.client != nil {
-		// Use client's WriteMessage method for client connections
-		sendErr = c.client.WriteMessage(messageType, data)
-	} else {
-		// Use server connection's SendFrame method
-		sendErr = c.underlying.SendFrame(frame)
-	}
+	// Send the frame using the server connection's SendFrame method
+	sendErr := c.underlying.SendFrame(frame)
 
 	// Release the buffer after we're done referencing it
-	if c.autoRelease {
+	if usePool && c.autoRelease {
 		buf.Release()
 	}
 
@@ -275,6 +255,21 @@ func (c *Conn) Close() error {
 		c.mutex.Lock()
 		c.closed = true
 		c.mutex.Unlock()
+
+		// Drain any queued buffers to avoid leaks
+		if c.incoming != nil {
+			for {
+				select {
+				case buf := <-c.incoming:
+					if buf.Data != nil {
+						buf.Release()
+					}
+				default:
+					goto drained
+				}
+			}
+		}
+	drained:
 
 		// Close the underlying connection
 		wsConn := c.GetUnderlyingWSConnection()
@@ -346,12 +341,35 @@ func (c *Conn) writeMessage(messageType int, data []byte) error {
 	}
 	c.mutex.RUnlock()
 
-	// Get a buffer from the pool for zero-copy sending
-	buf := c.pool.Get(len(data), -1)  // Use appropriate NUMA node
+	// Client connections can delegate directly to the low-level client to avoid buffer size mismatches.
+	if c.client != nil {
+		if c.writeTimeout > 0 {
+			done := make(chan error, 1)
+			go func() {
+				done <- c.client.WriteMessage(messageType, data)
+			}()
 
-	// Copy data to the buffer
+			select {
+			case err := <-done:
+				return err
+			case <-time.After(c.writeTimeout):
+				return errors.New("write timeout")
+			}
+		}
+		return c.client.WriteMessage(messageType, data)
+	}
+
+	// Get a buffer from the pool for zero-copy sending
+	buf := c.pool.Get(len(data), -1) // Use appropriate NUMA node
 	dest := buf.Bytes()
-	copy(dest, data)
+	usePool := len(dest) >= len(data)
+
+	if usePool {
+		copy(dest, data)
+	} else {
+		buf.Release()
+		dest = append([]byte(nil), data...)
+	}
 
 	// Create a frame based on message type
 	var opcode byte
@@ -378,51 +396,27 @@ func (c *Conn) writeMessage(messageType int, data []byte) error {
 		Payload:    dest[:len(data)], // Use the buffer slice directly for zero-copy
 	}
 
-	// For client connections, make sure frames are masked per RFC 6455
-	if c.client != nil {
-		frame.Masked = true
-	}
-
 	// Send the frame using the appropriate connection method with timeout
 	var sendErr error
-	if c.client != nil {
-		// Use client's WriteMessage method with timeout handling
-		if c.writeTimeout > 0 {
-			done := make(chan error, 1)
-			go func() {
-				done <- c.client.WriteMessage(messageType, data)
-			}()
+	// Use server connection's SendFrame method with timeout handling
+	if c.writeTimeout > 0 {
+		done := make(chan error, 1)
+		go func() {
+			done <- c.underlying.SendFrame(frame)
+		}()
 
-			select {
-			case sendErr = <-done:
-				// Message sent, continue
-			case <-time.After(c.writeTimeout):
-				sendErr = errors.New("write timeout")
-			}
-		} else {
-			sendErr = c.client.WriteMessage(messageType, data)
+		select {
+		case sendErr = <-done:
+			// Message sent, continue
+		case <-time.After(c.writeTimeout):
+			sendErr = errors.New("write timeout")
 		}
 	} else {
-		// Use server connection's SendFrame method with timeout handling
-		if c.writeTimeout > 0 {
-			done := make(chan error, 1)
-			go func() {
-				done <- c.underlying.SendFrame(frame)
-			}()
-
-			select {
-			case sendErr = <-done:
-				// Message sent, continue
-			case <-time.After(c.writeTimeout):
-				sendErr = errors.New("write timeout")
-			}
-		} else {
-			sendErr = c.underlying.SendFrame(frame)
-		}
+		sendErr = c.underlying.SendFrame(frame)
 	}
 
 	// Release the buffer after we're done referencing it
-	if c.autoRelease {
+	if usePool && c.autoRelease {
 		buf.Release()
 	}
 
@@ -434,6 +428,102 @@ func (c *Conn) SetCloseCallback(callback func()) {
 	c.mutex.Lock()
 	c.onClose = callback
 	c.mutex.Unlock()
+}
+
+// enqueueIncoming adds an inbound buffer to the queue for server-side reads.
+func (c *Conn) enqueueIncoming(buf api.Buffer) {
+	if c.incoming == nil {
+		buf.Release()
+		return
+	}
+
+	var done <-chan struct{}
+	if ws := c.GetUnderlyingWSConnection(); ws != nil {
+		done = ws.Done()
+	}
+
+	// Fast path: try non-blocking enqueue first.
+	select {
+	case c.incoming <- buf:
+		return
+	default:
+	}
+
+	// If the queue is full, block until space is available or the connection closes.
+	for {
+		select {
+		case c.incoming <- buf:
+			return
+		case <-done:
+			buf.Release()
+			return
+		}
+	}
+}
+
+// runHandlerOnce ensures the provided handler is started only once per connection.
+func (c *Conn) runHandlerOnce(handler func(*Conn)) {
+	c.handlerOnce.Do(func() {
+		go handler(c)
+	})
+}
+
+// readFromIncoming pulls a buffer from the inbound queue respecting deadlines.
+func (c *Conn) readFromIncoming() (int, []byte, error) {
+	var timeout <-chan time.Time
+	if c.readTimeout > 0 {
+		timeout = time.After(c.readTimeout)
+	}
+
+	var done <-chan struct{}
+	if ws := c.GetUnderlyingWSConnection(); ws != nil {
+		done = ws.Done()
+	}
+
+	if timeout != nil {
+		select {
+		case buf := <-c.incoming:
+			if buf.Data == nil {
+				return 0, nil, errors.New("connection closed")
+			}
+			return c.consumeBuffer(buf)
+		case <-timeout:
+			return 0, nil, errors.New("read timeout")
+		case <-done:
+			return 0, nil, errors.New("connection closed")
+		}
+	}
+
+	select {
+	case buf := <-c.incoming:
+		if buf.Data == nil {
+			return 0, nil, errors.New("connection closed")
+		}
+		return c.consumeBuffer(buf)
+	case <-done:
+		return 0, nil, errors.New("connection closed")
+	}
+}
+
+// consumeBuffer copies data out of the provided buffer and releases it.
+func (c *Conn) consumeBuffer(buf api.Buffer) (int, []byte, error) {
+	data := buf.Bytes()
+
+	if c.readLimit > 0 && int64(len(data)) > c.readLimit {
+		if c.autoRelease {
+			buf.Release()
+		}
+		return 0, nil, errors.New("message exceeds read limit")
+	}
+
+	result := make([]byte, len(data))
+	copy(result, data)
+
+	if c.autoRelease {
+		buf.Release()
+	}
+
+	return int(BinaryMessage), result, nil
 }
 
 // Param gets the value of a parameter by name.

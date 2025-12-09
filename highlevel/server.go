@@ -68,6 +68,9 @@ type Server struct {
 	// Connection tracking
 	connections   map[*Conn]bool
 	connectionsMu sync.RWMutex
+	// Map underlying WS connections to reusable high-level connections
+	connStore   map[*protocol.WSConnection]*Conn
+	connStoreMu sync.RWMutex
 	// Path patterns for route matching
 	patterns map[*regexp.Regexp]*RouteHandler
 	// Route patterns with parameter names (for named parameter extraction)
@@ -89,6 +92,7 @@ func NewServer(addr string) *Server {
 		ctx:            ctx,
 		cancel:         cancel,
 		connections:    make(map[*Conn]bool),
+		connStore:      make(map[*protocol.WSConnection]*Conn),
 		patterns:       make(map[*regexp.Regexp]*RouteHandler),
 		routePatterns:  make(map[string][]string),
 		patternMethods: make(map[*regexp.Regexp][]HTTPMethod),
@@ -477,6 +481,40 @@ func (s *Server) removeConnection(conn *Conn) {
 	delete(s.connections, conn)
 }
 
+// getOrCreateConn returns a reusable high-level connection wrapper for the given WSConnection.
+// It also sets up cleanup callbacks to keep tracking maps in sync.
+func (s *Server) getOrCreateConn(wsConn *protocol.WSConnection, params []RouteParam) *Conn {
+	s.connStoreMu.RLock()
+	if existing, ok := s.connStore[wsConn]; ok {
+		s.connStoreMu.RUnlock()
+		return existing
+	}
+	s.connStoreMu.RUnlock()
+
+	pool := s.underlying.GetBufferPool()
+	hlConn := newConnWithParams(wsConn, pool, params)
+	s.addConnection(hlConn)
+
+	hlConn.SetCloseCallback(func() {
+		s.removeConnection(hlConn)
+		s.connStoreMu.Lock()
+		delete(s.connStore, wsConn)
+		s.connStoreMu.Unlock()
+	})
+
+	s.connStoreMu.Lock()
+	s.connStore[wsConn] = hlConn
+	s.connStoreMu.Unlock()
+
+	// Ensure cleanup if the underlying connection closes first
+	go func() {
+		<-wsConn.Done()
+		hlConn.Close()
+	}()
+
+	return hlConn
+}
+
 // ListenAndServe starts the server and serves requests until an error occurs or the server is stopped.
 func (s *Server) ListenAndServe() error {
 	// Set configuration
@@ -491,7 +529,6 @@ func (s *Server) ListenAndServe() error {
 
 	// Create a combined handler that uses our routing
 	basicHandler := adapters.HandlerFunc(func(data any) error {
-		// fmt.Printf("DEBUG: basicHandler called with type: %T\n", data)
 		var buf api.Buffer
 
 		// Unpack buffer from data
@@ -504,6 +541,7 @@ func (s *Server) ListenAndServe() error {
 		if buf.Data != nil {
 			// This is a message from a connection
 			var wsConn *protocol.WSConnection
+			queued := false
 
 			// Check if the data contains a connection (in case of custom event with connection)
 			if connData, ok := data.(interface{ WSConnection() *protocol.WSConnection }); ok {
@@ -521,13 +559,15 @@ func (s *Server) ListenAndServe() error {
 				routeHandler, params := s.findHandler(wsConn.Path(), GET)
 
 				if routeHandler != nil {
-					// Create a high-level connection wrapper with parameters
-					pool := s.underlying.GetBufferPool()
-					hlConn := newConnWithParams(wsConn, pool, params)
+					// Reuse or create high-level connection, queue the message, and start handler once
+					hlConn := s.getOrCreateConn(wsConn, params)
+					hlConn.enqueueIncoming(buf)
+					queued = true
 
-					// Apply middleware chain to the handler
 					finalHandler := s.applyMiddleware(routeHandler.Handler)
-					finalHandler(hlConn)
+					hlConn.runHandlerOnce(func(conn *Conn) {
+						finalHandler(conn)
+					})
 				} else {
 					// No handler found, close connection or return error
 					// Create a basic connection just to close it
@@ -538,7 +578,9 @@ func (s *Server) ListenAndServe() error {
 			}
 
 			// Release the buffer since we're done with it
-			buf.Release()
+			if !queued {
+				buf.Release()
+			}
 		}
 		return nil
 	})
@@ -611,10 +653,15 @@ func (s *Server) Shutdown() error {
 
 	// Close all tracked connections
 	s.connectionsMu.Lock()
+	conns := make([]*Conn, 0, len(s.connections))
 	for conn := range s.connections {
-		conn.Close()
+		conns = append(conns, conn)
 	}
 	s.connectionsMu.Unlock()
+
+	for _, conn := range conns {
+		conn.Close()
+	}
 
 	return nil
 }

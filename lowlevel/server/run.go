@@ -8,7 +8,6 @@ package server
 
 import (
 	"context"
-	// "fmt" // DEBUG
 
 	"github.com/momentics/hioload-ws/adapters"
 	"github.com/momentics/hioload-ws/api"
@@ -144,7 +143,7 @@ func (s *Server) handleConnWithTracking(conn *protocol.WSConnection, poller api.
 		if err != nil {
 			return
 		}
-		
+
 		for _, buf := range bufs {
 			// Push each buffer as a bufEvent into the reactor's inbox.
 			// Create an event that contains both the buffer and the connection context
@@ -154,7 +153,6 @@ func (s *Server) handleConnWithTracking(conn *protocol.WSConnection, poller api.
 		}
 	}
 }
-
 
 // Shutdown signals Run to stop accepting and processing.
 func (s *Server) Shutdown() {

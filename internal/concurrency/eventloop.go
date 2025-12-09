@@ -124,7 +124,9 @@ func (el *EventLoop) Run() {
 					backoffNs = maxBackoffNs
 				}
 			}
-		} else {
+		}
+
+		if len(batch) > 0 {
 			// Create snapshot of handlers slice
 			handlers := el.handlers.Load().([]EventHandler)
 			for _, ev := range batch {

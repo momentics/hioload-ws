@@ -39,7 +39,7 @@ type handlerBridge struct {
 
 // HandleEvent dispatches to the wrapped api.Handler.
 func (hb *handlerBridge) HandleEvent(ev concurrency.Event) {
-	hb.inner.Handle(ev.Data)
+	hb.inner.Handle(ev.Data())
 }
 
 func (p *PollerAdapter) Register(h api.Handler) error {

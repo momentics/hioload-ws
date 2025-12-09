@@ -18,14 +18,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/momentics/hioload-ws/api"
-	pool "github.com/momentics/hioload-ws/core/buffer"
 	"github.com/momentics/hioload-ws/core/concurrency"
-	internal_transport "github.com/momentics/hioload-ws/internal/transport"
+	"github.com/momentics/hioload-ws/pool"
 	"github.com/momentics/hioload-ws/protocol"
 )
 
@@ -79,109 +77,56 @@ func NewClient(cfg *Config) (*Client, error) {
 	// Setup buffer pool manager
 	mgr := pool.NewBufferPoolManager(concurrency.NUMANodes())
 
-	// Try optimized "raw" client first (avoids Windows IOCP conflict)
-	tf := internal_transport.NewTransportFactory(cfg.IOBufferSize, cfg.NUMANode)
-	tr, err := tf.CreateClient(u.Host)
-	// UNCOMMENT ABOVE LINE TO USE OPTIMIZED TRANSPORT
-	// var tr api.Transport = nil
-	// err = fmt.Errorf("disabled")
-	// _ = tf // suppress unused warning
+	var tr api.Transport
 
-	if err == nil {
-		// fmt.Printf("DEBUG: Created optimized raw client transport.\n")
-
-		// We have a transport, but we need to do the HTTP handshake.
-		// Construct a dummy net.Conn adapter for the protocol handshake functions.
-		adapter := &transportAdapter{
-			tr: tr,
-		}
-
-		// Handshake
-		key := make([]byte, 16)
-		rand.Read(key)
-		secKey := base64.StdEncoding.EncodeToString(key)
-		reqStr := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", u.Path, u.Host, secKey)
-
-		// Send request directly
-		if err := adapter.WriteRaw([]byte(reqStr)); err != nil {
-			tr.Close()
-			return nil, fmt.Errorf("handshake write failed: %w", err)
-		}
-
-		// Read response using the helper which expects bufio-like behavior or just Read()
-		// protocol.DoClientHandshake expects a net.Conn to Read/Write.
-		// Let's use our adapter.
-
-		// Actually, DoClientHandshake does validation.
-		// We can just manually validate the response here to be simpler and strictly use our transport.
-		// Read response
-		respBuf := make([]byte, 4096)
-		n, err := adapter.Read(respBuf)
-		if err != nil {
-			tr.Close()
-			return nil, fmt.Errorf("handshake read failed: %w", err)
-		}
-		respStr := string(respBuf[:n])
-		if !strings.Contains(respStr, "101 Switching Protocols") {
-			tr.Close()
-			return nil, fmt.Errorf("handshake failed, invalid response: %s", respStr)
-		}
-
-	} else {
-		// Fallback to net.Dial
-		// fmt.Printf("DEBUG: Optimized client creation failed: %v. Using net.Dial.\n", err)
-		netConn, err := net.Dial("tcp", u.Host)
-		if err != nil {
-			return nil, fmt.Errorf("dial error: %w", err)
-		}
-
-		// Disable Nagle's algorithm for low-latency small packet transmission
-		if tc, ok := netConn.(*net.TCPConn); ok {
-			tc.SetNoDelay(true)
-		}
-
-		// Perform HTTP handshake on net.Conn
-		// fmt.Println("DEBUG: Fallback Handshake Start")
-		key := make([]byte, 16)
-		rand.Read(key)
-		secKey := base64.StdEncoding.EncodeToString(key)
-		req := &http.Request{
-			Method: "GET",
-			URL:    &url.URL{Path: u.Path},
-			Host:   u.Host,
-			Header: http.Header{
-				"Upgrade":               {"websocket"},
-				"Connection":            {"Upgrade"},
-				"Sec-WebSocket-Key":     {secKey},
-				"Sec-WebSocket-Version": {"13"},
-			},
-		}
-		// Use manual string construction to match optimized path and avoid req.Write quirks
-		path := u.Path
-		if path == "" {
-			path = "/"
-		}
-		reqStr := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", path, u.Host, secKey)
-		// fmt.Printf("DEBUG: Request string length: %d\n", len(reqStr))
-
-		if _, err := netConn.Write([]byte(reqStr)); err != nil {
-			netConn.Close()
-			return nil, err
-		}
-		// fmt.Println("DEBUG: Fallback Handshake Request Sent (Manual Fixed Path)")
-
-		// Set timeout for handshake response
-		netConn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		if err := protocol.DoClientHandshake(netConn, req); err != nil {
-			netConn.Close()
-			return nil, fmt.Errorf("fallback handshake failed: %w", err)
-		}
-		netConn.SetReadDeadline(time.Time{}) // Clear deadline
-		// fmt.Println("DEBUG: Fallback Handshake Done")
-
-		// Wrap
-		tr = NewTransport(netConn, mgr.GetPool(cfg.IOBufferSize, cfg.NUMANode), cfg.IOBufferSize)
+	// Optimized transport path is currently disabled for stability; use the Net fallback.
+	netConn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		return nil, fmt.Errorf("dial error: %w", err)
 	}
+
+	// Disable Nagle's algorithm for low-latency small packet transmission
+	if tc, ok := netConn.(*net.TCPConn); ok {
+		tc.SetNoDelay(true)
+	}
+
+	// Perform HTTP handshake on net.Conn
+	key := make([]byte, 16)
+	rand.Read(key)
+	secKey := base64.StdEncoding.EncodeToString(key)
+	req := &http.Request{
+		Method: "GET",
+		URL:    &url.URL{Path: u.Path},
+		Host:   u.Host,
+		Header: http.Header{
+			"Upgrade":               {"websocket"},
+			"Connection":            {"Upgrade"},
+			"Sec-WebSocket-Key":     {secKey},
+			"Sec-WebSocket-Version": {"13"},
+		},
+	}
+	// Use manual string construction to match optimized path and avoid req.Write quirks
+	path := u.Path
+	if path == "" {
+		path = "/"
+	}
+	reqStr := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", path, u.Host, secKey)
+
+	if _, err := netConn.Write([]byte(reqStr)); err != nil {
+		netConn.Close()
+		return nil, err
+	}
+
+	// Set timeout for handshake response
+	netConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := protocol.DoClientHandshake(netConn, req); err != nil {
+		netConn.Close()
+		return nil, fmt.Errorf("fallback handshake failed: %w", err)
+	}
+	netConn.SetReadDeadline(time.Time{}) // Clear deadline
+
+	// Wrap
+	tr = NewTransport(netConn, mgr.GetPool(cfg.IOBufferSize, cfg.NUMANode), cfg.IOBufferSize)
 
 	// Setup buffer pool (reuse existing manager)
 	bp := mgr.GetPool(cfg.IOBufferSize, cfg.NUMANode)
@@ -329,7 +274,14 @@ func (c *Client) WriteMessage(messageType int, data []byte) error {
 
 	// Copy data to the buffer
 	dest := buf.Bytes()
-	copy(dest, data)
+	usePool := len(dest) >= len(data)
+	if usePool {
+		copy(dest, data)
+	} else {
+		// Pool buffer too small; fall back to owned slice to avoid slicing panic
+		buf.Release()
+		dest = append([]byte(nil), data...)
+	}
 
 	// Create a frame - for client, frames must be masked per RFC 6455
 	frame := &protocol.WSFrame{
@@ -344,7 +296,9 @@ func (c *Client) WriteMessage(messageType int, data []byte) error {
 	err := c.conn.SendFrame(frame)
 
 	// Release the buffer after sending
-	buf.Release()
+	if usePool {
+		buf.Release()
+	}
 
 	return err
 }

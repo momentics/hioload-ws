@@ -149,23 +149,40 @@ type safeWrapper struct {
 
 func (w *safeWrapper) Send(bufs [][]byte) error {
 	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.impl.Send(bufs)
+	impl := w.impl
+	w.mu.RUnlock()
+	if impl == nil {
+		return api.ErrTransportClosed
+	}
+	return impl.Send(bufs)
 }
 func (w *safeWrapper) Recv() ([][]byte, error) {
 	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.impl.Recv()
+	impl := w.impl
+	w.mu.RUnlock()
+	if impl == nil {
+		return nil, api.ErrTransportClosed
+	}
+	return impl.Recv()
 }
 func (w *safeWrapper) Close() error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.impl.Close()
+	impl := w.impl
+	w.impl = nil
+	w.mu.Unlock()
+	if impl == nil {
+		return nil
+	}
+	return impl.Close()
 }
 func (w *safeWrapper) Features() api.TransportFeatures {
 	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.impl.Features()
+	impl := w.impl
+	w.mu.RUnlock()
+	if impl == nil {
+		return api.TransportFeatures{}
+	}
+	return impl.Features()
 }
 
 func (w *safeWrapper) GetBuffer() api.Buffer {
@@ -174,9 +191,10 @@ func (w *safeWrapper) GetBuffer() api.Buffer {
 	// Actually GetBuffer on transport usually implies allocating from its internal pool.
 	// We should probably lock.
 	w.mu.RLock()
-	defer w.mu.RUnlock()
-	
-	if getter, ok := w.impl.(interface{ GetBuffer() api.Buffer }); ok {
+	impl := w.impl
+	w.mu.RUnlock()
+
+	if getter, ok := impl.(interface{ GetBuffer() api.Buffer }); ok {
 		return getter.GetBuffer()
 	}
 	// Warning: this panic is what we are trying to fix, but at least we know where it comes from.

@@ -26,7 +26,7 @@ type Options struct {
 // DefaultOptions returns default client configuration.
 func DefaultOptions() Options {
 	return Options{
-		IOBufferSize: 4096,
+		IOBufferSize: 64 * 1024,
 		NUMANode:     -1,
 	}
 }
